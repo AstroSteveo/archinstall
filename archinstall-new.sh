@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #===========================================================
-# Arch Linux Installation Script - XDG + Zsh Everywhere
+# Arch Linux Installation Script
 #===========================================================
 
 readonly LOG_FILE="/var/log/archinstall.log"
@@ -509,41 +509,17 @@ configure_system() {
     return 0
 }
 
-setup_skel_xdg() {
-    log "Setting up /etc/skel for strict XDG and Zsh (with ZDOTDIR)"
-    for dir in \
-        /mnt/etc/skel/.config/zsh \
-        /mnt/etc/skel/.cache/zsh \
-        /mnt/etc/skel/.local/state/zsh \
-    do
-        mkdir -p "$dir"
-    done
-}
-
 setup_systemwide_zshenv() {
     log "Writing system-wide /etc/zsh/zshenv for strict XDG and ZDOTDIR"
     arch-chroot /mnt mkdir -p /etc/zsh
     cat > /mnt/etc/zsh/zshenv <<'EOF'
-# XDG Base Directory Specification variables (system-wide)
-export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
-export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
-export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
-export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-export XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}"
-export ZDOTDIR="$XDG_CONFIG_HOME/zsh"
+export ZDOTDIR="${XDG_CONFIG_HOME:-$HOME/.config}/zsh"
 EOF
 }
 
 set_systemwide_default_shell() {
     log "Setting system-wide default shell to zsh for new users"
     sed -i 's|^SHELL=.*|SHELL=/usr/bin/zsh|' /mnt/etc/default/useradd
-}
-
-copy_skel_to_root() {
-    log "Copying /etc/skel to /root"
-    arch-chroot /mnt cp -aT /etc/skel /root
-    arch-chroot /mnt chmod -R go-w /root
 }
 
 set_root_shell() {
@@ -642,9 +618,7 @@ main() {
     configure_initramfs || exit 1
     setup_network || exit 1
     configure_system || exit 1
-    copy_skel_to_root || exit 1
     set_root_shell || exit 1
-    setup_skel_xdg || exit 1
     setup_systemwide_zshenv || exit 1
     set_systemwide_default_shell || exit 1
     setup_user_accounts || exit 1
