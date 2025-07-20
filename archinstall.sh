@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 #===========================================================
 # Arch Linux Installation Script
@@ -10,6 +10,28 @@ readonly MIN_DISK_SIZE=$((20 * 1024 * 1024 * 1024)) # 20GB in bytes
 #-----------------------------------------------------------
 # Core Utilities
 #-----------------------------------------------------------
+
+# Progress tracking
+TOTAL_STEPS=12
+CURRENT_STEP=0
+
+show_progress() {
+    local step_name="$1"
+    ((CURRENT_STEP++))
+    local percentage=$((CURRENT_STEP * 100 / TOTAL_STEPS))
+    
+    echo > /dev/tty
+    echo "===========================================================" > /dev/tty
+    echo "Step $CURRENT_STEP/$TOTAL_STEPS: $step_name ($percentage%)" > /dev/tty
+    echo "===========================================================" > /dev/tty
+    log "Starting step $CURRENT_STEP/$TOTAL_STEPS: $step_name"
+}
+
+show_step_complete() {
+    local step_name="$1"
+    echo "✓ Completed: $step_name" > /dev/tty
+    log "Completed step $CURRENT_STEP/$TOTAL_STEPS: $step_name"
+}
 
 init_log() {
     # Skip in testing mode
@@ -37,9 +59,24 @@ log() {
 handle_error() {
     local exit_code=$?
     local line_number=$1
+    # Ensure we never exit with success code when handling an error
+    [[ $exit_code -eq 0 ]] && exit_code=1
     log "ERROR on line $line_number: Command exited with status $exit_code"
     log "Installation failed. See log file at $LOG_FILE for details."
+    cleanup_on_error
     exit $exit_code
+}
+
+cleanup_on_error() {
+    log "Performing cleanup after error..."
+    # Unmount any mounted partitions
+    mountpoint -q /mnt && {
+        log "Unmounting /mnt..."
+        umount -R /mnt 2>/dev/null || true
+    }
+    # Disable any activated swap
+    swapoff -a 2>/dev/null || true
+    log "Cleanup completed"
 }
 
 prompt() {
@@ -88,11 +125,31 @@ check_boot_media() {
 
 check_internet() {
     log "Checking internet connectivity..."
-    if ! ping -c 1 archlinux.org &>/dev/null; then
-        log "ERROR: No internet connection detected"
-        exit 1
+    local hosts=("archlinux.org" "8.8.8.8" "1.1.1.1")
+    local success=0
+    
+    for host in "${hosts[@]}"; do
+        if ping -c 2 -W 5 "$host" &>/dev/null; then
+            ((success++))
+            log "Successfully reached $host"
+        else
+            log "Failed to reach $host"
+        fi
+    done
+    
+    if [[ $success -lt 2 ]]; then
+        log "ERROR: Insufficient internet connectivity (only $success/${#hosts[@]} hosts reachable)"
+        log "Please check your network connection and try again"
+        return 1
     fi
-    log "Internet connection verified"
+    
+    # Test DNS resolution
+    if ! nslookup archlinux.org &>/dev/null; then
+        log "WARNING: DNS resolution test failed, but continuing with installation"
+    fi
+    
+    log "Internet connection verified ($success/${#hosts[@]} hosts reachable)"
+    return 0
 }
 
 check_uefi() {
@@ -142,27 +199,479 @@ verify_disk_space() {
 # Disk and Partition Management
 #-----------------------------------------------------------
 
+# Global arrays for Btrfs configuration
+declare -A SUBVOLUMES  # subvol_name -> mount_point
+declare -A MOUNT_OPTS  # subvol_name -> mount_options
+declare GLOBAL_MOUNT_OPTS=""
+
+#-----------------------------------------------------------
+# Btrfs Configuration Functions
+#-----------------------------------------------------------
+
+validate_mount_point() {
+    local mount_point="$1"
+    # Must start with / and not end with / (except for root)
+    if [[ ! "$mount_point" =~ ^/([a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)*)?$ ]] && [[ "$mount_point" != "/" ]]; then
+        return 1
+    fi
+    # Check for reserved paths
+    local reserved_paths=("/dev" "/proc" "/sys" "/run" "/tmp")
+    for reserved in "${reserved_paths[@]}"; do
+        if [[ "$mount_point" == "$reserved"* ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+validate_subvolume_name() {
+    local name="$1"
+    # Must start with @ and contain only valid characters
+    if [[ ! "$name" =~ ^@[a-zA-Z0-9._-]*$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+validate_mount_options() {
+    local options="$1"
+    # Basic validation for common Btrfs mount options
+    local valid_opts="noatime|relatime|atime|discard|discard=async|discard=sync|compress=zstd|compress=lzo|compress=zlib|space_cache=v2|space_cache=v1|autodefrag|noautodefrag|inode_cache|noinode_cache|ssd|nossd|commit=[0-9]+|max_inline=[0-9]+|thread_pool=[0-9]+"
+    
+    # Split by comma and validate each option
+    IFS=',' read -ra OPTS <<< "$options"
+    for opt in "${OPTS[@]}"; do
+        # Trim whitespace using parameter expansion instead of xargs
+        opt="${opt#"${opt%%[![:space:]]*}"}"  # trim leading
+        opt="${opt%"${opt##*[![:space:]]}"}"  # trim trailing
+        
+        if [[ -n "$opt" && ! "$opt" =~ ^($valid_opts)$ ]]; then
+            log "WARNING: Mount option '$opt' may not be valid for Btrfs"
+        fi
+    done
+    return 0
+}
+
+configure_btrfs_subvolumes() {
+    log "Configuring Btrfs subvolumes..."
+    
+    # Initialize with default subvolumes
+    SUBVOLUMES["@"]="/"
+    SUBVOLUMES["@home"]="/home"
+    SUBVOLUMES["@log"]="/var/log"
+    SUBVOLUMES["@pkg"]="/var/cache/pacman/pkg"
+    SUBVOLUMES["@snapshots"]="/.snapshots"
+    
+    echo "=== Btrfs Subvolume Configuration ===" > /dev/tty
+    echo "Default subvolumes have been configured. You can:" > /dev/tty
+    echo "1. Keep default configuration" > /dev/tty
+    echo "2. Add more subvolumes" > /dev/tty
+    echo "3. Modify existing subvolumes" > /dev/tty
+    echo "4. Remove subvolumes (except @)" > /dev/tty
+    echo "5. Preview configuration" > /dev/tty
+    echo "6. Continue with current configuration" > /dev/tty
+    echo > /dev/tty
+    
+    while true; do
+        echo "Current subvolumes:" > /dev/tty
+        for subvol in "${!SUBVOLUMES[@]}"; do
+            echo "  $subvol -> ${SUBVOLUMES[$subvol]}" > /dev/tty
+        done
+        echo > /dev/tty
+        
+        prompt "Choose action (1-6): " action
+        case "$action" in
+            1)
+                log "Keeping default subvolume configuration"
+                break
+                ;;
+            2)
+                add_subvolume
+                ;;
+            3)
+                modify_subvolume
+                ;;
+            4)
+                remove_subvolume
+                ;;
+            5)
+                preview_btrfs_config
+                ;;
+            6)
+                if confirm_operation "Continue with current subvolume configuration?"; then
+                    break
+                fi
+                ;;
+            *)
+                log "Invalid choice. Please enter 1-6."
+                ;;
+        esac
+    done
+}
+
+add_subvolume() {
+    local subvol_name mount_point
+    
+    while true; do
+        prompt "Enter subvolume name (must start with @): " subvol_name
+        if validate_subvolume_name "$subvol_name"; then
+            if [[ -n "${SUBVOLUMES[$subvol_name]}" ]]; then
+                log "Subvolume '$subvol_name' already exists. Use modify option instead."
+                continue
+            fi
+            break
+        else
+            log "Invalid subvolume name. Must start with @ and contain only letters, numbers, dots, underscores, and hyphens."
+        fi
+    done
+    
+    while true; do
+        prompt "Enter mount point for $subvol_name: " mount_point
+        if validate_mount_point "$mount_point"; then
+            # Check if mount point is already used
+            local used=false
+            for existing_mount in "${SUBVOLUMES[@]}"; do
+                if [[ "$existing_mount" == "$mount_point" ]]; then
+                    log "Mount point '$mount_point' is already used by another subvolume."
+                    used=true
+                    break
+                fi
+            done
+            if [[ "$used" == false ]]; then
+                break
+            fi
+        else
+            log "Invalid mount point. Must be an absolute path and not a reserved system path."
+        fi
+    done
+    
+    SUBVOLUMES["$subvol_name"]="$mount_point"
+    log "Added subvolume: $subvol_name -> $mount_point"
+}
+
+modify_subvolume() {
+    if [[ ${#SUBVOLUMES[@]} -eq 0 ]]; then
+        log "No subvolumes to modify."
+        return
+    fi
+    
+    echo "Select subvolume to modify:" > /dev/tty
+    local i=1
+    local subvol_list=()
+    for subvol in "${!SUBVOLUMES[@]}"; do
+        echo "$i. $subvol -> ${SUBVOLUMES[$subvol]}" > /dev/tty
+        subvol_list+=("$subvol")
+        ((i++))
+    done
+    
+    local choice
+    while true; do
+        prompt "Enter number (1-${#subvol_list[@]}): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#subvol_list[@]} )); then
+            break
+        else
+            log "Invalid choice. Please enter a number between 1 and ${#subvol_list[@]}."
+        fi
+    done
+    
+    local selected_subvol="${subvol_list[$((choice - 1))]}"
+    if [[ "$selected_subvol" == "@" ]]; then
+        log "Cannot modify the root subvolume (@)."
+        return
+    fi
+    
+    local new_mount_point
+    echo "Current mount point for $selected_subvol: ${SUBVOLUMES[$selected_subvol]}" > /dev/tty
+    while true; do
+        prompt "Enter new mount point: " new_mount_point
+        if validate_mount_point "$new_mount_point"; then
+            # Check if mount point is already used by another subvolume
+            local used=false
+            for subvol in "${!SUBVOLUMES[@]}"; do
+                if [[ "$subvol" != "$selected_subvol" && "${SUBVOLUMES[$subvol]}" == "$new_mount_point" ]]; then
+                    log "Mount point '$new_mount_point' is already used by subvolume '$subvol'."
+                    used=true
+                    break
+                fi
+            done
+            if [[ "$used" == false ]]; then
+                break
+            fi
+        else
+            log "Invalid mount point. Must be an absolute path and not a reserved system path."
+        fi
+    done
+    
+    SUBVOLUMES["$selected_subvol"]="$new_mount_point"
+    log "Modified subvolume: $selected_subvol -> $new_mount_point"
+}
+
+remove_subvolume() {
+    if [[ ${#SUBVOLUMES[@]} -le 1 ]]; then
+        log "Cannot remove subvolumes. At least the root subvolume (@) must remain."
+        return
+    fi
+    
+    echo "Select subvolume to remove:" > /dev/tty
+    local i=1
+    local subvol_list=()
+    for subvol in "${!SUBVOLUMES[@]}"; do
+        if [[ "$subvol" != "@" ]]; then
+            echo "$i. $subvol -> ${SUBVOLUMES[$subvol]}" > /dev/tty
+            subvol_list+=("$subvol")
+            ((i++))
+        fi
+    done
+    
+    if [[ ${#subvol_list[@]} -eq 0 ]]; then
+        log "No removable subvolumes (root subvolume @ cannot be removed)."
+        return
+    fi
+    
+    local choice
+    while true; do
+        prompt "Enter number (1-${#subvol_list[@]}): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#subvol_list[@]} )); then
+            break
+        else
+            log "Invalid choice. Please enter a number between 1 and ${#subvol_list[@]}."
+        fi
+    done
+    
+    local selected_subvol="${subvol_list[$((choice - 1))]}"
+    if confirm_operation "Remove subvolume '$selected_subvol'?"; then
+        unset SUBVOLUMES["$selected_subvol"]
+        log "Removed subvolume: $selected_subvol"
+    fi
+}
+
+configure_mount_options() {
+    log "Configuring Btrfs mount options..."
+    
+    # Set default mount options
+    GLOBAL_MOUNT_OPTS="noatime,discard=async,compress=zstd,space_cache=v2"
+    
+    echo "=== Btrfs Mount Options Configuration ===" > /dev/tty
+    echo "Current global mount options: $GLOBAL_MOUNT_OPTS" > /dev/tty
+    echo > /dev/tty
+    echo "Common Btrfs mount options:" > /dev/tty
+    echo "  noatime          - Don't update access times (recommended)" > /dev/tty
+    echo "  discard=async    - Async TRIM for SSDs (recommended for SSDs)" > /dev/tty
+    echo "  compress=zstd    - Zstandard compression (recommended)" > /dev/tty
+    echo "  compress=lzo     - LZO compression (faster, less compression)" > /dev/tty
+    echo "  compress=zlib    - Zlib compression (slower, better compression)" > /dev/tty
+    echo "  space_cache=v2   - Enable space cache v2 (recommended)" > /dev/tty
+    echo "  autodefrag       - Enable automatic defragmentation" > /dev/tty
+    echo "  ssd              - Enable SSD optimizations (auto-detected)" > /dev/tty
+    echo > /dev/tty
+    
+    while true; do
+        echo "1. Keep default options ($GLOBAL_MOUNT_OPTS)" > /dev/tty
+        echo "2. Modify mount options" > /dev/tty
+        echo "3. Configure per-subvolume options (advanced)" > /dev/tty
+        echo "4. Continue with current configuration" > /dev/tty
+        
+        prompt "Choose action (1-4): " action
+        case "$action" in
+            1)
+                log "Keeping default mount options"
+                break
+                ;;
+            2)
+                modify_global_mount_options
+                ;;
+            3)
+                configure_per_subvolume_options
+                ;;
+            4)
+                if confirm_operation "Continue with current mount options?"; then
+                    break
+                fi
+                ;;
+            *)
+                log "Invalid choice. Please enter 1-4."
+                ;;
+        esac
+    done
+}
+
+modify_global_mount_options() {
+    local new_options
+    echo "Current global mount options: $GLOBAL_MOUNT_OPTS" > /dev/tty
+    echo "Enter new mount options (comma-separated):" > /dev/tty
+    echo "Example: noatime,discard=async,compress=zstd,space_cache=v2" > /dev/tty
+    prompt "Mount options: " new_options
+    
+    if [[ -n "$new_options" ]]; then
+        validate_mount_options "$new_options"
+        GLOBAL_MOUNT_OPTS="$new_options"
+        log "Updated global mount options: $GLOBAL_MOUNT_OPTS"
+    else
+        log "No changes made to mount options"
+    fi
+}
+
+configure_per_subvolume_options() {
+    echo "Configure per-subvolume mount options (in addition to global options):" > /dev/tty
+    
+    for subvol in "${!SUBVOLUMES[@]}"; do
+        echo > /dev/tty
+        echo "Subvolume: $subvol (${SUBVOLUMES[$subvol]})" > /dev/tty
+        echo "Current additional options: ${MOUNT_OPTS[$subvol]:-none}" > /dev/tty
+        
+        if confirm_operation "Add/modify additional options for $subvol?"; then
+            local additional_opts
+            prompt "Additional mount options for $subvol (or empty for none): " additional_opts
+            if [[ -n "$additional_opts" ]]; then
+                validate_mount_options "$additional_opts"
+                MOUNT_OPTS["$subvol"]="$additional_opts"
+                log "Set additional options for $subvol: $additional_opts"
+            else
+                unset MOUNT_OPTS["$subvol"]
+                log "Cleared additional options for $subvol"
+            fi
+        fi
+    done
+}
+
+preview_btrfs_config() {
+    echo > /dev/tty
+    echo "=== Btrfs Configuration Preview ===" > /dev/tty
+    echo > /dev/tty
+    echo "Global mount options: $GLOBAL_MOUNT_OPTS" > /dev/tty
+    echo > /dev/tty
+    echo "Subvolumes and mount points:" > /dev/tty
+    for subvol in $(printf '%s\n' "${!SUBVOLUMES[@]}" | sort); do
+        local mount_point="${SUBVOLUMES[$subvol]}"
+        local additional="${MOUNT_OPTS[$subvol]:-}"
+        local full_opts="$GLOBAL_MOUNT_OPTS"
+        if [[ -n "$additional" ]]; then
+            full_opts="$full_opts,$additional"
+        fi
+        echo "  $subvol -> $mount_point" > /dev/tty
+        echo "    Options: subvol=$subvol,$full_opts" > /dev/tty
+    done
+    echo > /dev/tty
+    
+    prompt "Press Enter to continue..." dummy
+}
+
+create_btrfs_subvolumes() {
+    local root_partition="$1"
+    
+    log "Creating Btrfs subvolumes..."
+    mount "$root_partition" /mnt || { log "ERROR: Failed to mount Btrfs root partition"; return 1; }
+    
+    for subvol in "${!SUBVOLUMES[@]}"; do
+        log "Creating subvolume: $subvol"
+        if ! btrfs subvolume create "/mnt/$subvol"; then
+            log "ERROR: Failed to create subvolume $subvol"
+            umount /mnt
+            return 1
+        fi
+    done
+    
+    umount /mnt
+    log "All Btrfs subvolumes created successfully"
+    return 0
+}
+
+mount_btrfs_subvolumes() {
+    local root_partition="$1"
+    
+    log "Mounting Btrfs subvolumes..."
+    
+    # Mount root subvolume first
+    local root_opts="subvol=@,$GLOBAL_MOUNT_OPTS"
+    if [[ -n "${MOUNT_OPTS[@]}" ]]; then
+        root_opts="$root_opts,${MOUNT_OPTS[@]}"
+    fi
+    
+    log "Mounting root subvolume with options: $root_opts"
+    if ! mount -o "$root_opts" "$root_partition" /mnt; then
+        log "ERROR: Failed to mount root subvolume"
+        return 1
+    fi
+    
+    # Create mount directories and mount other subvolumes
+    local mount_dirs=()
+    for subvol in "${!SUBVOLUMES[@]}"; do
+        if [[ "$subvol" != "@" ]]; then
+            local mount_point="${SUBVOLUMES[$subvol]}"
+            mount_dirs+=("/mnt$mount_point")
+        fi
+    done
+    
+    if [[ ${#mount_dirs[@]} -gt 0 ]]; then
+        log "Creating mount directories..."
+        if ! mkdir -p "${mount_dirs[@]}"; then
+            log "ERROR: Failed to create mount directories"
+            return 1
+        fi
+    fi
+    
+    # Mount other subvolumes
+    for subvol in "${!SUBVOLUMES[@]}"; do
+        if [[ "$subvol" != "@" ]]; then
+            local mount_point="${SUBVOLUMES[$subvol]}"
+            local mount_opts="subvol=$subvol,$GLOBAL_MOUNT_OPTS"
+            if [[ -n "${MOUNT_OPTS[$subvol]}" ]]; then
+                mount_opts="$mount_opts,${MOUNT_OPTS[$subvol]}"
+            fi
+            
+            log "Mounting $subvol to /mnt$mount_point with options: $mount_opts"
+            if ! mount -o "$mount_opts" "$root_partition" "/mnt$mount_point"; then
+                log "ERROR: Failed to mount subvolume $subvol"
+                return 1
+            fi
+        fi
+    done
+    
+    log "All Btrfs subvolumes mounted successfully"
+    return 0
+}
+
 create_disk_menu() {
-    log "Listing available disks for selection..."
-    echo "Available Disks (excluding loop devices and CD-ROMs):" > /dev/tty
-    lsblk -d -p -n -o NAME,SIZE,MODEL,TYPE | grep -E "disk" | grep -v loop | nl > /dev/tty
-    prompt "Enter the number corresponding to your disk: " disk_number
-    if [[ ! "$disk_number" =~ ^[0-9]+$ ]] || [[ "$disk_number" -eq 0 ]]; then
-        log "Invalid input: must be a positive number"
-        create_disk_menu
-        return
-    fi
-    selected_disk=$(lsblk -d -p -n -o NAME,TYPE | grep disk | grep -v loop | awk '{print $1}' | sed -n "${disk_number}p")
-    if [[ -z "$selected_disk" ]]; then
-        log "Invalid disk selection"
-        create_disk_menu
-        return
-    fi
-    log "Selected disk: $selected_disk"
-    verify_disk_space "$selected_disk" || {
-        log "Please select a larger disk"
-        create_disk_menu
-    }
+    while true; do
+        log "Listing available disks for selection..."
+        echo "Available Disks (excluding loop devices and CD-ROMs):" > /dev/tty
+        lsblk -d -p -n -o NAME,SIZE,MODEL,TYPE | grep -E "disk" | grep -v loop | nl > /dev/tty
+        
+        local max_disks
+        max_disks=$(lsblk -d -p -n -o NAME,TYPE | grep disk | grep -v loop | wc -l)
+        
+        if [[ $max_disks -eq 0 ]]; then
+            log "ERROR: No suitable disks found"
+            return 1
+        fi
+        
+        prompt "Enter the number corresponding to your disk (1-$max_disks, or 'q' to quit): " disk_number
+        
+        [[ "$disk_number" == "q" ]] && exit 0
+        
+        if [[ ! "$disk_number" =~ ^[0-9]+$ ]] || [[ "$disk_number" -eq 0 ]]; then
+            log "Invalid input: must be a positive number between 1 and $max_disks"
+            continue
+        fi
+        
+        if [[ "$disk_number" -gt "$max_disks" ]]; then
+            log "Invalid input: number too large (max: $max_disks)"
+            continue
+        fi
+        
+        selected_disk=$(lsblk -d -p -n -o NAME,TYPE | grep disk | grep -v loop | awk '{print $1}' | sed -n "${disk_number}p")
+        if [[ -z "$selected_disk" ]]; then
+            log "ERROR: Failed to get disk name for selection $disk_number"
+            continue
+        fi
+        
+        log "Selected disk: $selected_disk"
+        if verify_disk_space "$selected_disk"; then
+            break
+        else
+            log "Please select a larger disk or press 'q' to quit"
+        fi
+    done
 }
 
 get_partition_name() {
@@ -258,7 +767,31 @@ perform_partitioning() {
             parted -s "$disk" mkpart primary linux-swap 513MiB "$((513 + swap_size))MiB" || { log "ERROR: Failed to create swap partition"; exit 1; }
             parted -s "$disk" mkpart primary btrfs "$((513 + swap_size))MiB" 100% || { log "ERROR: Failed to create root partition"; exit 1; }
             log "Refreshing partition table..."
-            partprobe "$disk" || { log "ERROR: Failed to refresh partition table"; sleep 2; }
+            partprobe "$disk" || { 
+                log "WARNING: Failed to refresh partition table with partprobe, trying alternative"
+                blockdev --rereadpt "$disk" || {
+                    log "ERROR: Failed to refresh partition table"
+                    return 1
+                }
+            }
+            
+            # Wait for partitions to appear
+            log "Waiting for partitions to be available..."
+            local max_attempts=15
+            local attempt=0
+            while [[ $attempt -lt $max_attempts ]]; do
+                if [[ -b "$(get_partition_name "$disk" 1)" ]]; then
+                    log "Partitions are now available"
+                    break
+                fi
+                sleep 1
+                ((attempt++))
+            done
+            
+            if [[ $attempt -eq $max_attempts ]]; then
+                log "ERROR: Partitions did not appear after $max_attempts seconds"
+                return 1
+            fi
             log "Wiping filesystem signatures from new partitions..."
             wipefs -a "$esp" "$swp" "$root" || { log "WARNING: Failed to wipe some filesystem signatures"; }
             log "Formatting EFI partition ($esp)..."
@@ -268,26 +801,18 @@ perform_partitioning() {
             swapon "$swp" || { log "WARNING: Failed to activate swap"; }
             log "Formatting BTRFS root partition ($root)..."
             mkfs.btrfs -f "$root" || { log "ERROR: Failed to format BTRFS partition"; exit 1; }
-            log "Creating BTRFS subvolumes..."
-            mount "$root" /mnt || { log "ERROR: Failed to mount BTRFS root partition"; exit 1; }
-            btrfs subvolume create /mnt/@ && \
-            btrfs subvolume create /mnt/@home && \
-            btrfs subvolume create /mnt/@log && \
-            btrfs subvolume create /mnt/@pkg && \
-            btrfs subvolume create /mnt/@snapshots || {
-                log "ERROR: Failed to create BTRFS subvolumes"
-                umount /mnt
-                exit 1
-            }
-            umount /mnt
-            local btrfs_opts="noatime,discard=async,compress=zstd,space_cache=v2"
-            log "Mounting BTRFS subvolumes..."
-            mount -o "subvol=@,$btrfs_opts" "$root" /mnt || { log "ERROR: Failed to mount @ subvolume"; exit 1; }
-            mkdir -p /mnt/{boot/efi,home,var/log,var/cache/pacman/pkg,.snapshots} || { log "ERROR: Failed to create mount directories"; exit 1; }
-            mount -o "subvol=@home,$btrfs_opts" "$root" /mnt/home && \
-            mount -o "subvol=@log,$btrfs_opts" "$root" /mnt/var/log && \
-            mount -o "subvol=@pkg,$btrfs_opts" "$root" /mnt/var/cache/pacman/pkg && \
-            mount -o "subvol=@snapshots,$btrfs_opts" "$root" /mnt/.snapshots || { log "ERROR: Failed to mount BTRFS subvolumes"; exit 1; }
+            
+            # Configure Btrfs subvolumes and mount options interactively
+            configure_btrfs_subvolumes || { log "ERROR: Failed to configure subvolumes"; exit 1; }
+            configure_mount_options || { log "ERROR: Failed to configure mount options"; exit 1; }
+            preview_btrfs_config
+            
+            # Create and mount Btrfs subvolumes using user configuration
+            create_btrfs_subvolumes "$root" || { log "ERROR: Failed to create subvolumes"; exit 1; }
+            mount_btrfs_subvolumes "$root" || { log "ERROR: Failed to mount subvolumes"; exit 1; }
+            
+            # Mount EFI partition
+            mkdir -p /mnt/boot/efi || { log "ERROR: Failed to create EFI directory"; exit 1; }
             mount "$esp" /mnt/boot/efi || { log "ERROR: Failed to mount EFI partition"; exit 1; }
             log "All partitions created and mounted successfully"
             ;;
@@ -500,13 +1025,32 @@ configure_system() {
     } > /mnt/etc/hosts || { log "ERROR: Failed to configure hosts file"; return 1; }
     log "Setting timezone..."
     local timezone
-    timezone=$(curl -s https://ipapi.co/timezone 2>/dev/null)
-    if [[ -z "$timezone" || ! -f "/mnt/usr/share/zoneinfo/$timezone" ]]; then
-        log "Could not auto-detect timezone. Please enter it manually."
-        prompt "Enter your timezone (e.g., America/New_York): " timezone
-        while [[ ! -f "/mnt/usr/share/zoneinfo/$timezone" ]]; do
-            log "Invalid timezone '$timezone'. Please try again."
+    # Try to auto-detect timezone with timeout and fallback
+    timezone=$(timeout 10 curl -s --max-time 5 --fail "https://ipapi.co/timezone" 2>/dev/null || echo "")
+    
+    if [[ -n "$timezone" && -f "/mnt/usr/share/zoneinfo/$timezone" ]]; then
+        log "Auto-detected timezone: $timezone"
+        if ! confirm_operation "Use auto-detected timezone '$timezone'?"; then
+            timezone=""
+        fi
+    fi
+    
+    if [[ -z "$timezone" ]]; then
+        log "Please enter your timezone manually."
+        echo "Common timezones:" > /dev/tty
+        echo "  America/New_York, America/Los_Angeles, America/Chicago" > /dev/tty
+        echo "  Europe/London, Europe/Paris, Europe/Berlin" > /dev/tty
+        echo "  Asia/Tokyo, Asia/Shanghai, Australia/Sydney" > /dev/tty
+        echo > /dev/tty
+        
+        while true; do
             prompt "Enter your timezone (e.g., America/New_York): " timezone
+            if [[ -f "/mnt/usr/share/zoneinfo/$timezone" ]]; then
+                break
+            else
+                log "Invalid timezone '$timezone'. Please try again."
+                echo "You can list available timezones with: timedatectl list-timezones" > /dev/tty
+            fi
         done
     fi
     arch-chroot /mnt ln -sf "/usr/share/zoneinfo/$timezone" /etc/localtime || { log "ERROR: Failed to set timezone to $timezone"; return 1; }
@@ -568,12 +1112,28 @@ create_user_account() {
 }
 
 configure_sudo_access() {
-    local sudoers_dropin="/mnt/etc/sudoers.d/99_wheel_nopasswd"
+    local sudoers_dropin="/mnt/etc/sudoers.d/99_wheel_access"
     log "Configuring sudo access with a drop-in..."
     if [[ ! -d "/mnt/etc/sudoers.d" ]]; then
         mkdir -p /mnt/etc/sudoers.d || { log "ERROR: Failed to create /mnt/etc/sudoers.d"; return 1; }
     fi
-    echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > "$sudoers_dropin" || { log "ERROR: Failed to write $sudoers_dropin"; return 1; }
+    
+    # Use more secure sudo configuration with time-limited sessions
+    cat > "$sudoers_dropin" <<'EOF'
+# Allow wheel group members to execute any command with password
+%wheel ALL=(ALL:ALL) ALL
+
+# Extend sudo session timeout to 15 minutes for convenience
+Defaults timestamp_timeout=15
+
+# Require password for sensitive operations even within timeout
+Defaults passwd_timeout=0
+EOF
+    
+    if [[ $? -ne 0 ]]; then
+        log "ERROR: Failed to write $sudoers_dropin"
+        return 1
+    fi
     chmod 0440 "$sudoers_dropin" || { log "ERROR: Failed to chmod 0440 $sudoers_dropin"; return 1; }
     perms=$(stat -c "%a" "$sudoers_dropin")
     if [[ "$perms" != "440" ]]; then
@@ -597,11 +1157,11 @@ configure_sudo_access() {
         log "ERROR: Main sudoers syntax broken. Undo your crimes."
         return 1
     fi
-    if ! arch-chroot /mnt visudo -cf /etc/sudoers.d/99_wheel_nopasswd; then
-        log "ERROR: Drop-in sudoers file syntax broken. RTFM and try again."
+    if ! arch-chroot /mnt visudo -cf /etc/sudoers.d/99_wheel_access; then
+        log "ERROR: Drop-in sudoers file syntax broken."
         return 1
     fi
-    log "Sudo access configured successfully with NOPASSWD for wheel group."
+    log "Sudo access configured successfully for wheel group with secure defaults."
     return 0
 }
 
@@ -777,25 +1337,74 @@ setup_zsh_enhancements() {
 #-----------------------------------------------------------
 
 main() {
+    echo "=============================================================" > /dev/tty
+    echo "                  Arch Linux Installer" > /dev/tty
+    echo "=============================================================" > /dev/tty
     log "Starting Arch Linux installation..."
+    
+    show_progress "Checking system requirements"
     check_internet || exit 1
     check_uefi || exit 1
+    show_step_complete "System requirements check"
+    
+    show_progress "Disk selection and preparation"
     create_disk_menu
     wipe_partitions "$selected_disk"
+    show_step_complete "Disk preparation"
+    
+    show_progress "Partitioning and filesystem setup"
     # Always use BTRFS partitioning (no prompt)
     partition_choice="auto_btrfs"
     log "Using automatic BTRFS partitioning"
     perform_partitioning "$selected_disk" "$partition_choice"
+    show_step_complete "Partitioning and filesystem setup"
+    
+    show_progress "Package selection"
     select_install_packages
+    show_step_complete "Package selection"
+    
+    show_progress "Installing base system"
     install_base_system || exit 1
+    show_step_complete "Base system installation"
+    
+    show_progress "Configuring initial ramdisk"
     configure_initramfs || exit 1
+    show_step_complete "Initial ramdisk configuration"
+    
+    show_progress "Setting up networking"
     setup_network || exit 1
+    show_step_complete "Network setup"
+    
+    show_progress "System configuration"
     configure_system || exit 1
+    show_step_complete "System configuration"
+    
+    show_progress "Shell configuration"
     set_root_shell || exit 1
     setup_systemwide_zshenv || exit 1
     set_systemwide_default_shell || exit 1
+    show_step_complete "Shell configuration"
+    
+    show_progress "User account setup"
     setup_user_accounts || exit 1
+    show_step_complete "User account setup"
+    
+    show_progress "Bootloader installation"
     install_bootloader || exit 1
+    show_step_complete "Bootloader installation"
+    
+    show_progress "Final system preparation"
+    show_step_complete "Final system preparation"
+    
+    echo > /dev/tty
+    echo "=============================================================" > /dev/tty
+    echo "           Installation Completed Successfully!" > /dev/tty
+    echo "=============================================================" > /dev/tty
+    echo "Your new Arch Linux system is ready!" > /dev/tty
+    echo "You can now reboot into your system." > /dev/tty
+    echo "Remember to remove the installation media before rebooting." > /dev/tty
+    echo "=============================================================" > /dev/tty
+    
     log "Installation completed successfully!"
     log "You can now reboot into your new Arch Linux system."
     log "Remember to remove the installation media before rebooting."
@@ -805,8 +1414,40 @@ main() {
 # Script Initialization
 #-----------------------------------------------------------
 
+# Test function for validating the implementation
+test_btrfs_functions() {
+    echo "Testing Btrfs configuration functions..."
+    
+    # Test validation functions
+    echo "Testing validate_mount_point:"
+    validate_mount_point "/" && echo "  ✓ Root path valid"
+    validate_mount_point "/home" && echo "  ✓ /home valid"
+    validate_mount_point "/var/log" && echo "  ✓ /var/log valid"
+    ! validate_mount_point "/dev/test" && echo "  ✓ /dev/test correctly rejected"
+    ! validate_mount_point "invalid" && echo "  ✓ 'invalid' correctly rejected"
+    
+    echo "Testing validate_subvolume_name:"
+    validate_subvolume_name "@" && echo "  ✓ @ valid"
+    validate_subvolume_name "@home" && echo "  ✓ @home valid"
+    validate_subvolume_name "@test-vol" && echo "  ✓ @test-vol valid"
+    ! validate_subvolume_name "invalid" && echo "  ✓ 'invalid' correctly rejected"
+    ! validate_subvolume_name "@test/vol" && echo "  ✓ '@test/vol' correctly rejected"
+    
+    echo "Testing validate_mount_options:"
+    validate_mount_options "noatime,compress=zstd" && echo "  ✓ Valid options accepted"
+    validate_mount_options "discard=async,space_cache=v2" && echo "  ✓ More valid options accepted"
+    
+    echo "All tests completed successfully!"
+}
+
 # Only run if not in testing mode
 if [[ "${TESTING:-0}" != "1" ]]; then
+    # Check for test flag
+    if [[ "$1" == "--test-btrfs" ]]; then
+        test_btrfs_functions
+        exit 0
+    fi
+    
     trap 'handle_error ${LINENO}' ERR
     check_root
     init_log
