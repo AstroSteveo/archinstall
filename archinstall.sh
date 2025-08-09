@@ -34,6 +34,7 @@ ENABLE_MULTILIB="no"
 SWAP_SIZE="$DEFAULT_SWAP_SIZE"
 EFI_SIZE="$DEFAULT_EFI_SIZE"
 TIMEZONE=""
+SWAP_PARTITION=""
 
 #######################################
 # Logging helpers
@@ -59,7 +60,9 @@ yes_no_prompt() {
     local prompt="$1"
     local reply
     while true; do
-        read -rp "$prompt [y/n]: " reply
+        if ! read -rp "$prompt [y/n]: " reply; then
+            fatal "Input aborted"
+        fi
         case "$reply" in
             [Yy]) return 0 ;;
             [Nn]) return 1 ;;
@@ -80,7 +83,9 @@ select_from_menu() {
         for i in "${!options[@]}"; do
             printf '%d) %s\n' "$((i+1))" "${options[i]}"
         done
-        read -rp "Select an option (1-${num}): " choice
+        if ! read -rp "Select an option (1-${num}): " choice; then
+            fatal "Input aborted"
+        fi
         if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= num )); then
             echo "${options[$((choice-1))]}"
             return 0
@@ -191,7 +196,9 @@ get_btrfs_layout() {
 
 get_hostname() {
     while true; do
-        read -rp "Enter hostname for this system: " HOSTNAME
+        if ! read -rp "Enter hostname for this system: " HOSTNAME; then
+            fatal "Input aborted"
+        fi
         [[ -n "$HOSTNAME" ]] || { warning "Hostname cannot be empty"; continue; }
         if validate_hostname "$HOSTNAME"; then
             break
@@ -206,9 +213,15 @@ get_password() {
     local prompt="$1"
     local pass confirm
     while true; do
-        read -rsp "$prompt: " pass; echo
+        if ! read -rsp "$prompt: " pass; then
+            fatal "Input aborted"
+        fi
+        echo
         (( ${#pass} >= 8 )) || { warning "Password must be at least 8 characters long"; continue; }
-        read -rsp "Confirm password: " confirm; echo
+        if ! read -rsp "Confirm password: " confirm; then
+            fatal "Input aborted"
+        fi
+        echo
         [[ "$pass" == "$confirm" ]] || { warning "Passwords do not match"; continue; }
         echo "$pass"
         return 0
@@ -222,7 +235,9 @@ get_root_password() {
 
 get_user_configuration() {
     while true; do
-        read -rp "Enter username for standard user: " USERNAME
+        if ! read -rp "Enter username for standard user: " USERNAME; then
+            fatal "Input aborted"
+        fi
         [[ -n "$USERNAME" ]] || { warning "Username cannot be empty"; continue; }
         if validate_username "$USERNAME"; then
             break
@@ -293,14 +308,18 @@ choose_timezone() {
         fi
     fi
     while true; do
-        read -rp "Enter your timezone (e.g. America/Chicago): " TIMEZONE
+        if ! read -rp "Enter your timezone (e.g. America/Chicago): " TIMEZONE; then
+            fatal "Input aborted"
+        fi
         [[ -f "/usr/share/zoneinfo/$TIMEZONE" ]] && break
         warning "Invalid timezone. Please choose a valid entry from /usr/share/zoneinfo."
     done
 }
 
 configure_swap_size() {
-    read -rp "Enter swap size (e.g. 2G, 512M) [default $SWAP_SIZE]: " size
+    if ! read -rp "Enter swap size (e.g. 2G, 512M) [default $SWAP_SIZE]: " size; then
+        fatal "Input aborted"
+    fi
     if [[ -n "$size" ]]; then
         if [[ "$size" =~ ^[0-9]+[MG]$ ]]; then
             SWAP_SIZE="$size"
@@ -314,6 +333,15 @@ configure_swap_size() {
 #######################################
 # Disk management functions
 #######################################
+partition_prefix() {
+    local disk="$1"
+    if [[ "$disk" =~ (nvme|mmcblk|loop) ]]; then
+        echo "${disk}p"
+    else
+        echo "$disk"
+    fi
+}
+
 create_partitions() {
     info "Creating partitions on $DISK"
     wipefs -af "$DISK"
@@ -328,16 +356,18 @@ create_partitions() {
 
 format_partitions() {
     info "Formatting partitions"
-    local prefix="$DISK"
-    [[ "$DISK" == *"nvme"* ]] && prefix="${DISK}p"
+    local prefix
+    prefix=$(partition_prefix "$DISK")
 
-    local efi_partition="${prefix}1"
-    local swap_partition="${prefix}2"
-    local root_partition="${prefix}3"
+  local efi_partition="${prefix}1"
+  local swap_partition="${prefix}2"
+  local root_partition="${prefix}3"
 
-    mkfs.fat -F32 "$efi_partition"
-    mkswap "$swap_partition"
-    swapon "$swap_partition"
+  SWAP_PARTITION="$swap_partition"
+
+  mkfs.fat -F32 "$efi_partition"
+  mkswap "$swap_partition"
+  swapon "$swap_partition"
 
     case "$FILESYSTEM_TYPE" in
         ext4) mkfs.ext4 -F "$root_partition" ;;
@@ -349,8 +379,8 @@ format_partitions() {
 
 mount_filesystems() {
     info "Mounting filesystems"
-    local prefix="$DISK"
-    [[ "$DISK" == *"nvme"* ]] && prefix="${DISK}p"
+    local prefix
+    prefix=$(partition_prefix "$DISK")
 
     local efi_partition="${prefix}1"
     local root_partition="${prefix}3"
@@ -451,8 +481,8 @@ EOF
 
 configure_bootloader() {
     info "Configuring bootloader: $BOOTLOADER"
-    local prefix="$DISK"
-    [[ "$DISK" == *"nvme"* ]] && prefix="${DISK}p"
+    local prefix
+    prefix=$(partition_prefix "$DISK")
     local root_uuid
     root_uuid=$(blkid -s UUID -o value "${prefix}3")
 
@@ -544,10 +574,12 @@ cleanup() {
             fi
         done
     fi
-    if mountpoint -q "$MOUNT_POINT"; then
-        umount "$MOUNT_POINT" || true
-    fi
-    swapoff -a || true
+  if mountpoint -q "$MOUNT_POINT"; then
+      umount "$MOUNT_POINT" || true
+  fi
+  if [[ -n "$SWAP_PARTITION" ]]; then
+      swapoff "$SWAP_PARTITION" || true
+  fi
 }
 
 main() {
