@@ -143,7 +143,7 @@ get_disk_selection() {
             disks+=("/dev/$name")
             labels+=("$name ($size) - $model")
         fi
-    done < <(lsblk -d -n -o NAME,SIZE,MODEL | grep -E "sd[a-z]|nvme[0-9]n[0-9]|vd[a-z]")
+    done < <(lsblk -d -n -o NAME,SIZE,MODEL | grep -E "sd[a-z]|nvme[0-9]+n[0-9]+|vd[a-z]")
 
     if [[ ${#disks[@]} -eq 0 ]]; then
         fatal "No suitable disks found"
@@ -404,7 +404,7 @@ install_base_system() {
         btrfs) pkgs+=(btrfs-progs) ;;
         xfs)   pkgs+=(xfsprogs)    ;;
     esac
-    pacstrap "$MOUNT_POINT" "${pkgs[@]}"
+    pacstrap --noconfirm "$MOUNT_POINT" "${pkgs[@]}"
     success "Base system installed successfully"
 }
 
@@ -534,23 +534,23 @@ cleanup() {
     info "Performing cleanup"
     # Unmount submounts in reverse order
     if mountpoint -q "$MOUNT_POINT/boot"; then
-        umount "$MOUNT_POINT/boot"
+        umount "$MOUNT_POINT/boot" || true
     fi
     if [[ "$FILESYSTEM_TYPE" == "btrfs" ]]; then
         for sub in home var/log var/cache/pacman/pkg; do
             if mountpoint -q "$MOUNT_POINT/$sub"; then
-                umount "$MOUNT_POINT/$sub"
+                umount "$MOUNT_POINT/$sub" || true
             fi
         done
     fi
     if mountpoint -q "$MOUNT_POINT"; then
-        umount "$MOUNT_POINT"
+        umount "$MOUNT_POINT" || true
     fi
     swapoff -a || true
 }
-trap cleanup EXIT
 
 main() {
+    trap cleanup EXIT
     info "Starting Arch Linux installation"
     validate_uefi_boot
     validate_network
@@ -579,9 +579,9 @@ main() {
     mount_filesystems
 
     install_base_system
-    configure_system
     configure_pacman
     install_additional_packages
+    configure_system
     configure_bootloader
     configure_users
 
