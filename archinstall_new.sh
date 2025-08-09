@@ -332,6 +332,15 @@ configure_swap_size() {
 #######################################
 # Disk management functions
 #######################################
+partition_prefix() {
+    local disk="$1"
+    if [[ "$disk" =~ (nvme|mmcblk|loop) ]]; then
+        echo "${disk}p"
+    else
+        echo "$disk"
+    fi
+}
+
 create_partitions() {
     info "Creating partitions on $DISK"
     wipefs -af "$DISK"
@@ -346,8 +355,8 @@ create_partitions() {
 
 format_partitions() {
     info "Formatting partitions"
-    local prefix="$DISK"
-    [[ "$DISK" == *"nvme"* ]] && prefix="${DISK}p"
+    local prefix
+    prefix=$(partition_prefix "$DISK")
 
   local efi_partition="${prefix}1"
   local swap_partition="${prefix}2"
@@ -369,8 +378,8 @@ format_partitions() {
 
 mount_filesystems() {
     info "Mounting filesystems"
-    local prefix="$DISK"
-    [[ "$DISK" == *"nvme"* ]] && prefix="${DISK}p"
+    local prefix
+    prefix=$(partition_prefix "$DISK")
 
     local efi_partition="${prefix}1"
     local root_partition="${prefix}3"
@@ -471,8 +480,8 @@ EOF
 
 configure_bootloader() {
     info "Configuring bootloader: $BOOTLOADER"
-    local prefix="$DISK"
-    [[ "$DISK" == *"nvme"* ]] && prefix="${DISK}p"
+    local prefix
+    prefix=$(partition_prefix "$DISK")
     local root_uuid
     root_uuid=$(blkid -s UUID -o value "${prefix}3")
 

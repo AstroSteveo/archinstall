@@ -268,7 +268,7 @@ source_archinstall_functions() {
 run_test() {
     local test_name="$1"
     local test_function="$2"
-    
+
     CURRENT_TEST="$test_name"
     ((TESTS_RUN+=1))
     
@@ -497,6 +497,14 @@ test_create_partitions_gpt() {
     else
         return 1
     fi
+}
+
+test_partition_prefix() {
+    assert_equals "/dev/sda" "$(partition_prefix /dev/sda)" "Prefix for sda incorrect"
+    assert_equals "/dev/nvme0n1p" "$(partition_prefix /dev/nvme0n1)" "Prefix for nvme incorrect"
+    assert_equals "/dev/mmcblk0p" "$(partition_prefix /dev/mmcblk0)" "Prefix for mmcblk incorrect"
+    assert_equals "/dev/loop0p" "$(partition_prefix /dev/loop0)" "Prefix for loop incorrect"
+    return 0
 }
 
 test_format_partitions_ext4() {
@@ -793,6 +801,7 @@ main() {
     
     # Disk Management Tests
     run_test "Create Partitions (GPT)" test_create_partitions_gpt
+    run_test "Partition Prefix Helper" test_partition_prefix
     run_test "Format Partitions (ext4)" test_format_partitions_ext4
     run_test "Format Partitions (btrfs)" test_format_partitions_btrfs
     run_test "Mount Filesystems" test_mount_filesystems
