@@ -154,6 +154,7 @@ setup_mocks() {
     
     # Create mock executables
     create_mock_command "curl"
+    create_mock_command "ping"
     create_mock_command "lsblk"
     create_mock_command "blkid"
     create_mock_command "mount"
@@ -205,34 +206,19 @@ setup_mock_responses() {
     cat > "$MOCK_DIR/bin/lsblk" << 'EOF'
 #!/bin/bash
 echo "MOCK_CALL: lsblk $*" >> /tmp/mock_calls.log
-if [[ "$*" == *"-o NAME,SIZE,TYPE"* ]]; then
+if [[ "$*" == *"-o NAME,SIZE,MODEL,TYPE"* ]]; then
     cat << 'LSBLK_OUTPUT'
-NAME        SIZE TYPE
-sda        100G disk
-├─sda1     512M part
-├─sda2       2G part
-└─sda3    97.5G part
-sdb         50G disk
-nvme0n1    250G disk
+sda 100G MockDisk disk
+sdb 50G MockDisk disk
+nvme0n1 250G MockNVMe disk
 LSBLK_OUTPUT
 else
     echo "sda sdb nvme0n1"
 fi
 exit ${MOCK_EXIT_CODE:-0}
 EOF
-    
-    cat > "$MOCK_DIR/bin/ping" << 'EOF'
-#!/bin/bash
-echo "MOCK_CALL: ping $*" >> /tmp/mock_calls.log
-if [[ "$*" == *"archlinux.org"* ]]; then
-    echo "PING archlinux.org: 56 data bytes"
-    echo "64 bytes from archlinux.org: icmp_seq=0 ttl=51 time=20.1 ms"
-fi
-exit ${MOCK_EXIT_CODE:-0}
-EOF
-    
+
     chmod +x "$MOCK_DIR/bin/lsblk"
-    chmod +x "$MOCK_DIR/bin/ping"
 }
 
 cleanup_mocks() {
@@ -330,12 +316,9 @@ test_validate_uefi_boot_failure() {
 }
 
 test_validate_network_success() {
-    # Mock successful curl
     export MOCK_EXIT_CODE=0
 
     validate_network
-
-    # Check if curl was called
     if grep -q "curl.*archlinux.org" /tmp/mock_calls.log; then
         return 0
     else
@@ -345,7 +328,7 @@ test_validate_network_success() {
 }
 
 test_validate_network_failure() {
-    # Simulate failed network check
+    export MOCK_EXIT_CODE=1
     fatal() { return 1; }
     validate_network() {
         info "Checking network connectivity..."
@@ -353,9 +336,9 @@ test_validate_network_failure() {
     }
 
     if validate_network; then
-        return 1  # Test failed - should have detected network failure
+        return 1
     else
-        return 0  # Test passed - correctly detected network failure
+        return 0
     fi
 }
 
@@ -543,7 +526,6 @@ test_format_partitions_btrfs() {
 test_mount_filesystems() {
     export DISK="/dev/sda"
     export FILESYSTEM_TYPE="ext4"
-
     mount_filesystems
     
     # Verify mount commands were called
