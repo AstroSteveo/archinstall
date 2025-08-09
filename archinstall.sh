@@ -12,7 +12,7 @@ readonly MOUNT_POINT="/mnt"
 readonly DEFAULT_EFI_SIZE="512M"
 readonly DEFAULT_SWAP_SIZE="2G"
 
-# Colour codes
+# Color codes
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
