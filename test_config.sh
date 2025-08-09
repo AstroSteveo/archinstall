@@ -26,11 +26,12 @@ declare -A MOCK_PARTITIONS=(
 # Valid test usernames
 VALID_USERNAMES=(
     "user"
-    "testuser" 
+    "testuser"
     "test_user"
     "user123"
     "a"
     "user-name"
+    "user-"        # Ends with dash, still valid
     "arch"
     "linux"
     "admin"
@@ -46,7 +47,6 @@ INVALID_USERNAMES=(
     "verylongusernamethatistoolongtobevalidbecauseitexceedsthirtytwocharacters"
     "user."          # Ends with dot
     "-user"          # Starts with dash
-    "user-"          # Ends with dash
     "root"           # Reserved username
     "bin"            # System username
 )
