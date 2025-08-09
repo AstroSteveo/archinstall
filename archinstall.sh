@@ -34,7 +34,6 @@ HOSTNAME=""
 BOOTLOADER=""
 CPU_VENDOR=""
 ENABLE_MULTILIB=""
-BTRFS_CUSTOM_LAYOUT=""
 
 #######################################
 # Logging and Output Functions
@@ -128,9 +127,12 @@ get_disk_selection() {
     local disk_info=()
     
     while IFS= read -r line; do
-        local disk_name=$(echo "$line" | awk '{print $1}')
-        local disk_size=$(echo "$line" | awk '{print $2}')
-        local disk_model=$(echo "$line" | cut -d' ' -f3-)
+        local disk_name
+        local disk_size
+        local disk_model
+        disk_name=$(echo "$line" | awk '{print $1}')
+        disk_size=$(echo "$line" | awk '{print $2}')
+        disk_model=$(echo "$line" | cut -d' ' -f3-)
         
         if [[ -b "/dev/$disk_name" ]]; then
             disks+=("/dev/$disk_name")
@@ -148,7 +150,7 @@ get_disk_selection() {
     done
     
     while true; do
-        read -p "Select disk (1-${#disks[@]}): " choice
+        read -r -p "Select disk (1-${#disks[@]}): " choice
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#disks[@]} ]]; then
             DISK="${disks[$((choice-1))]}"
             break
@@ -161,7 +163,7 @@ get_disk_selection() {
     
     if validate_disk "$DISK"; then
         warning "WARNING: All data on $DISK will be destroyed!"
-        read -p "Are you sure you want to continue? (yes/no): " confirm
+        read -r -p "Are you sure you want to continue? (yes/no): " confirm
         if [[ "$confirm" != "yes" ]]; then
             fatal "Installation cancelled by user"
         fi
@@ -175,7 +177,7 @@ get_filesystem_type() {
     echo "3) xfs (high performance)"
     
     while true; do
-        read -p "Select filesystem type (1-3): " choice
+        read -r -p "Select filesystem type (1-3): " choice
         case "$choice" in
             1) FILESYSTEM_TYPE="ext4"; break ;;
             2) FILESYSTEM_TYPE="btrfs"; break ;;
@@ -201,19 +203,17 @@ get_btrfs_layout() {
     echo "  @pkg -> /var/cache/pacman/pkg"
     echo
     
-    read -p "Use default subvolume layout? (y/n): " use_default
+    read -r -p "Use default subvolume layout? (y/n): " use_default
     if [[ "$use_default" == "y" ]]; then
-        BTRFS_CUSTOM_LAYOUT="no"
         success "Using default btrfs subvolume layout"
     else
-        BTRFS_CUSTOM_LAYOUT="yes"
         warning "Custom btrfs layouts not implemented in this version. Using default layout."
     fi
 }
 
 get_hostname() {
     while true; do
-        read -p "Enter hostname for this system: " HOSTNAME
+        read -r -p "Enter hostname for this system: " HOSTNAME
         if [[ -z "$HOSTNAME" ]]; then
             warning "Hostname cannot be empty"
             continue
@@ -231,14 +231,14 @@ get_hostname() {
 
 get_root_password() {
     while true; do
-        read -s -p "Enter root password: " ROOT_PASSWORD
+        read -r -s -p "Enter root password: " ROOT_PASSWORD
         echo
         if [[ ${#ROOT_PASSWORD} -lt 8 ]]; then
             warning "Password must be at least 8 characters long"
             continue
         fi
         
-        read -s -p "Confirm root password: " confirm
+        read -r -s -p "Confirm root password: " confirm
         echo
         if [[ "$ROOT_PASSWORD" != "$confirm" ]]; then
             warning "Passwords do not match"
@@ -253,7 +253,7 @@ get_root_password() {
 
 get_user_configuration() {
     while true; do
-        read -p "Enter username for standard user: " USERNAME
+        read -r -p "Enter username for standard user: " USERNAME
         if [[ -z "$USERNAME" ]]; then
             warning "Username cannot be empty"
             continue
@@ -267,14 +267,14 @@ get_user_configuration() {
     done
     
     while true; do
-        read -s -p "Enter password for $USERNAME: " USER_PASSWORD
+        read -r -s -p "Enter password for $USERNAME: " USER_PASSWORD
         echo
         if [[ ${#USER_PASSWORD} -lt 8 ]]; then
             warning "Password must be at least 8 characters long"
             continue
         fi
         
-        read -s -p "Confirm password for $USERNAME: " confirm
+        read -r -s -p "Confirm password for $USERNAME: " confirm
         echo
         if [[ "$USER_PASSWORD" != "$confirm" ]]; then
             warning "Passwords do not match"
@@ -284,7 +284,7 @@ get_user_configuration() {
         break
     done
     
-    read -p "Grant sudo privileges to $USERNAME? (y/n): " sudo_choice
+    read -r -p "Grant sudo privileges to $USERNAME? (y/n): " sudo_choice
     ENABLE_SUDO=$([ "$sudo_choice" = "y" ] && echo "yes" || echo "no")
     
     info "Available shells:"
@@ -293,7 +293,7 @@ get_user_configuration() {
     echo "3) fish (user-friendly)"
     
     while true; do
-        read -p "Select shell for $USERNAME (1-3): " shell_choice
+        read -r -p "Select shell for $USERNAME (1-3): " shell_choice
         case "$shell_choice" in
             1) USER_SHELL="bash"; break ;;
             2) USER_SHELL="zsh"; break ;;
@@ -312,7 +312,7 @@ get_bootloader_selection() {
     echo "3) rEFInd (graphical, advanced)"
     
     while true; do
-        read -p "Select bootloader (1-3): " choice
+        read -r -p "Select bootloader (1-3): " choice
         case "$choice" in
             1) BOOTLOADER="grub"; break ;;
             2) BOOTLOADER="systemd-boot"; break ;;
@@ -343,7 +343,7 @@ get_multilib_preference() {
     info "Multilib repository provides 32-bit compatibility for 64-bit systems."
     info "This is useful for gaming, Wine, and some proprietary software."
     
-    read -p "Enable multilib repository? (y/n): " multilib_choice
+    read -r -p "Enable multilib repository? (y/n): " multilib_choice
     ENABLE_MULTILIB=$([ "$multilib_choice" = "y" ] && echo "yes" || echo "no")
     
     if [[ "$ENABLE_MULTILIB" == "yes" ]]; then
@@ -373,7 +373,9 @@ create_partitions() {
     # Create swap partition
     local swap_start=$EFI_SIZE
     local swap_end
-    swap_end=$(( ${EFI_SIZE%M} + ${SWAP_SIZE%G} * 1024 ))M
+    local efi_size_mb=${EFI_SIZE%M}
+    local swap_size_gb=${SWAP_SIZE%G}
+    swap_end=$((efi_size_mb + swap_size_gb * 1024))M
     parted "$DISK" --script mkpart primary linux-swap "$swap_start" "$swap_end"
     
     # Create root partition (remaining space)
@@ -707,7 +709,7 @@ setopt appendhistory
 # Basic prompt
 PS1='%n@%m:%~$ '
 EOF
-            chown 1000:1000 "$MOUNT_POINT/home/$USERNAME/.zshrc"
+            arch-chroot "$MOUNT_POINT" chown "$USERNAME:$USERNAME" "/home/$USERNAME/.zshrc"
             ;;
         fish)
             # Create fish config directory
@@ -788,7 +790,7 @@ main() {
     echo "Multilib: $ENABLE_MULTILIB"
     echo
     
-    read -p "Proceed with installation? (yes/no): " confirm
+    read -r -p "Proceed with installation? (yes/no): " confirm
     if [[ "$confirm" != "yes" ]]; then
         fatal "Installation cancelled by user"
     fi
@@ -809,7 +811,7 @@ main() {
     success "Arch Linux installation completed successfully!"
     info "System is ready to boot. Remove installation media and reboot."
     
-    read -p "Reboot now? (y/n): " reboot_choice
+    read -r -p "Reboot now? (y/n): " reboot_choice
     if [[ "$reboot_choice" == "y" ]]; then
         reboot
     fi
