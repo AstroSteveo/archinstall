@@ -154,6 +154,7 @@ setup_mocks() {
     
     # Create mock executables
     create_mock_command "ping"
+    create_mock_command "curl"
     create_mock_command "lsblk"
     create_mock_command "blkid"
     create_mock_command "mount"
@@ -327,13 +328,30 @@ test_validate_uefi_boot_failure() {
     fi
 }
 
-test_validate_network_success() {
-    # Mock successful ping
+test_validate_network_success_curl() {
     export MOCK_EXIT_CODE=0
-    
+
     validate_network
-    
-    # Check if ping was called
+
+    if grep -q "curl.*archlinux.org" /tmp/mock_calls.log; then
+        return 0
+    else
+        test_failure "curl command not called"
+        return 1
+    fi
+}
+
+test_validate_network_success_ping_fallback() {
+    export MOCK_EXIT_CODE=0
+    cat > "$MOCK_DIR/bin/curl" <<'EOF'
+#!/bin/bash
+echo "MOCK_CALL: curl $*" >> /tmp/mock_calls.log
+exit 1
+EOF
+    chmod +x "$MOCK_DIR/bin/curl"
+
+    validate_network
+
     if grep -q "ping.*archlinux.org" /tmp/mock_calls.log; then
         return 0
     else
@@ -343,16 +361,34 @@ test_validate_network_success() {
 }
 
 test_validate_network_failure() {
-    # Mock failed ping
     export MOCK_EXIT_CODE=1
-    
-    # Override fatal function to return error instead of exiting
+
     fatal() { return 1; }
-    
+
     if validate_network; then
-        return 1  # Test failed - should have detected network failure
+        return 1
     else
-        return 0  # Test passed - correctly detected network failure
+        return 0
+    fi
+}
+
+test_validate_network_failure_no_tools() {
+    fatal() { return 1; }
+    command() {
+        if [[ $1 == -v && ( $2 == curl || $2 == ping ) ]]; then
+            return 1
+        fi
+        builtin command "$@"
+    }
+    ping() { return 127; }
+    curl() { return 127; }
+
+    if validate_network; then
+        unset -f command ping curl
+        return 1
+    else
+        unset -f command ping curl
+        return 0
     fi
 }
 
@@ -756,8 +792,10 @@ main() {
     # Validation Function Tests
     run_test "UEFI Boot Validation (Success)" test_validate_uefi_boot_success
     run_test "UEFI Boot Validation (Failure)" test_validate_uefi_boot_failure
-    run_test "Network Validation (Success)" test_validate_network_success
+    run_test "Network Validation (Success via curl)" test_validate_network_success_curl
+    run_test "Network Validation (Success via ping fallback)" test_validate_network_success_ping_fallback
     run_test "Network Validation (Failure)" test_validate_network_failure
+    run_test "Network Validation (Failure no tools)" test_validate_network_failure_no_tools
     run_test "Disk Validation (Success)" test_validate_disk_success
     run_test "Disk Validation (Nonexistent)" test_validate_disk_nonexistent
     run_test "Username Validation (Valid)" test_validate_username_valid
