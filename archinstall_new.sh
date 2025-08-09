@@ -106,10 +106,29 @@ validate_uefi_boot() {
 
 validate_network() {
     info "Checking network connectivity..."
-    if ! curl --silent --head --fail https://archlinux.org/ >/dev/null; then
+
+    if command -v curl >/dev/null 2>&1; then
+        if curl --max-time 10 --silent --head --fail https://archlinux.org/ >/dev/null; then
+            success "Network connectivity confirmed"
+            return 0
+        else
+            warning "curl check failed; attempting ping..."
+            if ! command -v ping >/dev/null 2>&1; then
+                fatal "Network check failed with curl and ping is not installed."
+            fi
+        fi
+    else
+        warning "curl not found; falling back to ping..."
+        if ! command -v ping >/dev/null 2>&1; then
+            fatal "Neither curl nor ping is available. Please install curl or iputils."
+        fi
+    fi
+
+    if ping -c 1 -W 5 archlinux.org >/dev/null; then
+        success "Network connectivity confirmed"
+    else
         fatal "No internet connection. Please configure networking and try again."
     fi
-    success "Network connectivity confirmed"
 }
 
 validate_disk() {
