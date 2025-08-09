@@ -255,6 +255,33 @@ source_archinstall_functions() {
     # Source the functions
     source "$temp_script"
     
+    # Override functions that might cause issues during testing
+    fatal() {
+        echo -e "${RED}[FATAL]${NC} $*" >&2
+        return 1
+    }
+    
+    # Override logging functions to avoid file I/O issues
+    log() {
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - $*"
+    }
+    
+    info() {
+        echo -e "${BLUE}[INFO]${NC} $*"
+    }
+    
+    success() {
+        echo -e "${GREEN}[SUCCESS]${NC} $*"
+    }
+    
+    warning() {
+        echo -e "${YELLOW}[WARNING]${NC} $*"
+    }
+    
+    error() {
+        echo -e "${RED}[ERROR]${NC} $*"
+    }
+    
     # Clean up
     rm -f "$temp_script"
 }
