@@ -120,18 +120,15 @@ USER_SHELLS=(
 # lsblk output variations
 MOCK_LSBLK_SIMPLE="sda sdb nvme0n1"
 
-MOCK_LSBLK_DETAILED="NAME        SIZE TYPE
-sda        100G disk
-├─sda1     512M part
-├─sda2       2G part
-└─sda3    97.5G part
-sdb         50G disk
-nvme0n1    250G disk"
+MOCK_LSBLK_DETAILED="NAME        SIZE MODEL     TYPE
+sda        100G MockDisk disk
+sdb         50G MockDisk disk
+nvme0n1    250G MockNVMe disk"
 
 MOCK_LSBLK_EMPTY=""
 
-MOCK_LSBLK_SINGLE_DISK="NAME        SIZE TYPE
-sda        100G disk"
+MOCK_LSBLK_SINGLE_DISK="NAME        SIZE MODEL     TYPE
+sda        100G MockDisk disk"
 
 # blkid output variations
 MOCK_BLKID_OUTPUT="/dev/sda1: UUID=\"1234-5678\" TYPE=\"vfat\" PARTUUID=\"abcd-1234\"

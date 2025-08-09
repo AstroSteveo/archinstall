@@ -153,6 +153,7 @@ setup_mocks() {
     touch "$MOCK_DIR/dev/nvme0n1"
     
     # Create mock executables
+    create_mock_command "curl"
     create_mock_command "ping"
     create_mock_command "lsblk"
     create_mock_command "blkid"
@@ -203,34 +204,19 @@ setup_mock_responses() {
     cat > "$MOCK_DIR/bin/lsblk" << 'EOF'
 #!/bin/bash
 echo "MOCK_CALL: lsblk $*" >> /tmp/mock_calls.log
-if [[ "$*" == *"-o NAME,SIZE,TYPE"* ]]; then
+if [[ "$*" == *"-o NAME,SIZE,MODEL,TYPE"* ]]; then
     cat << 'LSBLK_OUTPUT'
-NAME        SIZE TYPE
-sda        100G disk
-├─sda1     512M part
-├─sda2       2G part
-└─sda3    97.5G part
-sdb         50G disk
-nvme0n1    250G disk
+sda 100G MockDisk disk
+sdb 50G MockDisk disk
+nvme0n1 250G MockNVMe disk
 LSBLK_OUTPUT
 else
     echo "sda sdb nvme0n1"
 fi
 exit ${MOCK_EXIT_CODE:-0}
 EOF
-    
-    cat > "$MOCK_DIR/bin/ping" << 'EOF'
-#!/bin/bash
-echo "MOCK_CALL: ping $*" >> /tmp/mock_calls.log
-if [[ "$*" == *"archlinux.org"* ]]; then
-    echo "PING archlinux.org: 56 data bytes"
-    echo "64 bytes from archlinux.org: icmp_seq=0 ttl=51 time=20.1 ms"
-fi
-exit ${MOCK_EXIT_CODE:-0}
-EOF
-    
+
     chmod +x "$MOCK_DIR/bin/lsblk"
-    chmod +x "$MOCK_DIR/bin/ping"
 }
 
 cleanup_mocks() {
@@ -268,7 +254,7 @@ run_test() {
     local test_function="$2"
     
     CURRENT_TEST="$test_name"
-    ((TESTS_RUN++))
+    ((TESTS_RUN++)) || true
     
     test_info "Running: $test_name"
     
@@ -277,10 +263,10 @@ run_test() {
     
     if "$test_function"; then
         test_success "$test_name"
-        ((TESTS_PASSED++))
+        ((TESTS_PASSED++)) || true
     else
         test_failure "$test_name"
-        ((TESTS_FAILED++))
+        ((TESTS_FAILED++)) || true
     fi
     
     echo
@@ -328,31 +314,27 @@ test_validate_uefi_boot_failure() {
 }
 
 test_validate_network_success() {
-    # Mock successful ping
     export MOCK_EXIT_CODE=0
-    
+
     validate_network
-    
-    # Check if ping was called
-    if grep -q "ping.*archlinux.org" /tmp/mock_calls.log; then
+
+    if grep -q "curl.*archlinux.org" /tmp/mock_calls.log; then
         return 0
     else
-        test_failure "ping command not called"
+        test_failure "curl command not called"
         return 1
     fi
 }
 
 test_validate_network_failure() {
-    # Mock failed ping
     export MOCK_EXIT_CODE=1
-    
-    # Override fatal function to return error instead of exiting
+
     fatal() { return 1; }
-    
+
     if validate_network; then
-        return 1  # Test failed - should have detected network failure
+        return 1
     else
-        return 0  # Test passed - correctly detected network failure
+        return 0
     fi
 }
 
@@ -532,7 +514,6 @@ test_format_partitions_btrfs() {
 test_mount_filesystems() {
     export DISK="/dev/sda"
     export FILESYSTEM_TYPE="ext4"
-    export MOUNT_POINT="/mnt"
     
     mount_filesystems
     

@@ -135,6 +135,7 @@ get_disk_selection() {
     local labels=()
 
     while IFS= read -r line; do
+        line="${line% disk}"
         local name size model
         name=$(awk '{print $1}' <<< "$line")
         size=$(awk '{print $2}' <<< "$line")
@@ -143,7 +144,7 @@ get_disk_selection() {
             disks+=("/dev/$name")
             labels+=("$name ($size) - $model")
         fi
-    done < <(lsblk -d -n -o NAME,SIZE,MODEL | grep -E "sd[a-z]|nvme[0-9]n[0-9]|vd[a-z]")
+    done < <(lsblk -dn -o NAME,SIZE,MODEL,TYPE | awk '$4 == "disk"')
 
     if [[ ${#disks[@]} -eq 0 ]]; then
         fatal "No suitable disks found"
