@@ -606,17 +606,46 @@ test_configure_bootloader_systemd() {
 test_configure_users() {
     export USERNAME="testuser"
     export USER_PASSWORD="testpass"
-    export USER_SHELL="/bin/bash"
+    export USER_SHELL="zsh"
     export ENABLE_SUDO="yes"
     export ROOT_PASSWORD="rootpass"
-    
+    mkdir -p "$MOUNT_POINT/home/$USERNAME"
+    mkdir -p "$MOUNT_POINT/etc/sudoers.d"
+
+    id -u "$USERNAME" &>/dev/null || /usr/sbin/useradd -M "$USERNAME"
+
+    cat > "$MOCK_DIR/bin/arch-chroot" <<'EOF'
+#!/bin/bash
+echo "MOCK_CALL: $0 $*" >> /tmp/mock_calls.log
+CHROOT="$1"
+shift
+cmd="$1"
+shift
+if [[ "$cmd" == "chown" ]]; then
+    chown "$1" "$CHROOT$2"
+fi
+exit 0
+EOF
+    chmod +x "$MOCK_DIR/bin/arch-chroot"
+
     configure_users
-    
-    # Verify user creation commands
+
+    assert_file_exists "$MOUNT_POINT/home/$USERNAME/.zshrc" ".zshrc not created"
+
+    local owner
+    owner=$(stat -c '%U' "$MOUNT_POINT/home/$USERNAME/.zshrc")
+    assert_equals "$USERNAME" "$owner" ".zshrc ownership incorrect"
+
+    if [[ "$ENABLE_SUDO" == "yes" ]]; then
+        assert_file_exists "$MOUNT_POINT/etc/sudoers.d/$USERNAME" "sudoers file missing"
+    fi
+
     if grep -q "useradd" /tmp/mock_calls.log; then
+        create_mock_command "arch-chroot"
         return 0
     else
         test_failure "useradd command not found in mock calls"
+        create_mock_command "arch-chroot"
         return 1
     fi
 }
