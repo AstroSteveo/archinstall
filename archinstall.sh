@@ -53,6 +53,24 @@ fatal() {
 }
 
 #######################################
+# Pre-flight checks
+#######################################
+require_root() {
+    if [[ "$EUID" -ne 0 ]]; then
+        fatal "This script must be run as root"
+    fi
+}
+
+check_dependencies() {
+    local deps=(lsblk curl sgdisk partprobe pacstrap arch-chroot)
+    for cmd in "${deps[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            fatal "Required command '$cmd' not found"
+        fi
+    done
+}
+
+#######################################
 # Prompt helpers
 #######################################
 yes_no_prompt() {
@@ -589,6 +607,8 @@ cleanup() {
 }
 
 main() {
+    require_root
+    check_dependencies
     trap cleanup EXIT
     info "Starting Arch Linux installation"
     validate_uefi_boot
