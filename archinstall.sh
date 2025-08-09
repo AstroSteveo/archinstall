@@ -34,6 +34,7 @@ ENABLE_MULTILIB="no"
 SWAP_SIZE="$DEFAULT_SWAP_SIZE"
 EFI_SIZE="$DEFAULT_EFI_SIZE"
 TIMEZONE=""
+SWAP_PARTITION=""
 
 #######################################
 # Logging helpers
@@ -330,13 +331,15 @@ format_partitions() {
     local prefix="$DISK"
     [[ "$DISK" == *"nvme"* ]] && prefix="${DISK}p"
 
-    local efi_partition="${prefix}1"
-    local swap_partition="${prefix}2"
-    local root_partition="${prefix}3"
+  local efi_partition="${prefix}1"
+  local swap_partition="${prefix}2"
+  local root_partition="${prefix}3"
 
-    mkfs.fat -F32 "$efi_partition"
-    mkswap "$swap_partition"
-    swapon "$swap_partition"
+  SWAP_PARTITION="$swap_partition"
+
+  mkfs.fat -F32 "$efi_partition"
+  mkswap "$swap_partition"
+  swapon "$swap_partition"
 
     case "$FILESYSTEM_TYPE" in
         ext4) mkfs.ext4 -F "$root_partition" ;;
@@ -543,10 +546,12 @@ cleanup() {
             fi
         done
     fi
-    if mountpoint -q "$MOUNT_POINT"; then
-        umount "$MOUNT_POINT" || true
-    fi
-    swapoff -a || true
+  if mountpoint -q "$MOUNT_POINT"; then
+      umount "$MOUNT_POINT" || true
+  fi
+  if [[ -n "$SWAP_PARTITION" ]]; then
+      swapoff "$SWAP_PARTITION" || true
+  fi
 }
 
 main() {
