@@ -112,9 +112,15 @@ validate_disk() {
     if [[ ! -b "$disk" ]]; then
         fatal "Disk $disk does not exist or is not a block device"
     fi
-    if mount | grep -qE "^$disk"; then
+
+    if [[ $(lsblk -dn -o TYPE "$disk") != "disk" ]]; then
+        fatal "Target $disk is not a disk device"
+    fi
+
+    if lsblk -rno MOUNTPOINT "$disk" | grep -qE '\S'; then
         fatal "Disk $disk has mounted partitions. Please unmount them before proceeding."
     fi
+
     success "Disk $disk validated"
 }
 
