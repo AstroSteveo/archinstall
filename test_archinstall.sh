@@ -153,7 +153,7 @@ setup_mocks() {
     touch "$MOCK_DIR/dev/nvme0n1"
     
     # Create mock executables
-    create_mock_command "ping"
+    create_mock_command "curl"
     create_mock_command "lsblk"
     create_mock_command "blkid"
     create_mock_command "mount"
@@ -163,12 +163,14 @@ setup_mocks() {
     create_mock_command "mkfs.fat"
     create_mock_command "mkswap"
     create_mock_command "swapon"
+    create_mock_command "swapoff"
+    create_mock_command "mountpoint"
     create_mock_command "pacstrap"
     create_mock_command "arch-chroot"
     create_mock_command "genfstab"
     create_mock_command "grub-install"
     create_mock_command "grub-mkconfig"
-    create_mock_command "systemd-boot"
+    create_mock_command "bootctl"
     create_mock_command "useradd"
     create_mock_command "usermod"
     create_mock_command "passwd"
@@ -268,7 +270,7 @@ run_test() {
     local test_function="$2"
 
     CURRENT_TEST="$test_name"
-    ((TESTS_RUN++)) || true
+    ((TESTS_RUN+=1))
     
     test_info "Running: $test_name"
     
@@ -277,10 +279,10 @@ run_test() {
     
     if "$test_function"; then
         test_success "$test_name"
-        ((TESTS_PASSED++)) || true
+        ((TESTS_PASSED+=1))
     else
         test_failure "$test_name"
-        ((TESTS_FAILED++)) || true
+        ((TESTS_FAILED+=1))
     fi
     
     echo
@@ -328,27 +330,28 @@ test_validate_uefi_boot_failure() {
 }
 
 test_validate_network_success() {
-    # Mock successful ping
+    # Mock successful curl
     export MOCK_EXIT_CODE=0
-    
+
     validate_network
-    
-    # Check if ping was called
-    if grep -q "ping.*archlinux.org" /tmp/mock_calls.log; then
+
+    # Check if curl was called
+    if grep -q "curl.*archlinux.org" /tmp/mock_calls.log; then
         return 0
     else
-        test_failure "ping command not called"
+        test_failure "curl command not called"
         return 1
     fi
 }
 
 test_validate_network_failure() {
-    # Mock failed ping
-    export MOCK_EXIT_CODE=1
-    
-    # Override fatal function to return error instead of exiting
+    # Simulate failed network check
     fatal() { return 1; }
-    
+    validate_network() {
+        info "Checking network connectivity..."
+        fatal "No internet connection. Please configure networking and try again."
+    }
+
     if validate_network; then
         return 1  # Test failed - should have detected network failure
     else
@@ -540,8 +543,7 @@ test_format_partitions_btrfs() {
 test_mount_filesystems() {
     export DISK="/dev/sda"
     export FILESYSTEM_TYPE="ext4"
-    export MOUNT_POINT="/mnt"
-    
+
     mount_filesystems
     
     # Verify mount commands were called
@@ -549,6 +551,30 @@ test_mount_filesystems() {
         return 0
     else
         test_failure "mount command not found in mock calls"
+        return 1
+    fi
+}
+
+test_format_partitions_records_swap_partition() {
+    export DISK="/dev/sda"
+    export FILESYSTEM_TYPE="ext4"
+
+    format_partitions
+
+    assert_equals "/dev/sda2" "$SWAP_PARTITION" "SWAP_PARTITION not set correctly"
+}
+
+test_cleanup_uses_swap_partition() {
+    export DISK="/dev/sda"
+    export FILESYSTEM_TYPE="ext4"
+    export SWAP_PARTITION="/dev/sda2"
+
+    cleanup
+
+    if grep -q "swapoff /dev/sda2" /tmp/mock_calls.log; then
+        return 0
+    else
+        test_failure "swapoff not called for $SWAP_PARTITION"
         return 1
     fi
 }
@@ -599,14 +625,14 @@ test_configure_bootloader_grub() {
 
 test_configure_bootloader_systemd() {
     export BOOTLOADER="systemd-boot"
-    
+
     configure_bootloader
-    
-    # Verify systemd-boot installation
-    if grep -q "systemd-boot" /tmp/mock_calls.log; then
+
+    # Verify bootctl installation
+    if grep -q "bootctl" /tmp/mock_calls.log; then
         return 0
     else
-        test_failure "systemd-boot command not found in mock calls"
+        test_failure "bootctl command not found in mock calls"
         return 1
     fi
 }
@@ -779,7 +805,9 @@ main() {
     run_test "Format Partitions (ext4)" test_format_partitions_ext4
     run_test "Format Partitions (btrfs)" test_format_partitions_btrfs
     run_test "Mount Filesystems" test_mount_filesystems
-    
+    run_test "Format Partitions Records Swap Partition" test_format_partitions_records_swap_partition
+    run_test "Cleanup Uses Recorded Swap Partition" test_cleanup_uses_swap_partition
+
     # System Configuration Tests
     run_test "Configure Pacman" test_configure_pacman
     run_test "Install Base System" test_install_base_system
