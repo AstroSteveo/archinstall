@@ -513,7 +513,7 @@ HISTFILE=~/.zsh_history
 setopt appendhistory
 PS1='%n@%m:%~$ '
 EOF
-            chown 1000:1000 "$MOUNT_POINT/home/$USERNAME/.zshrc"
+            arch-chroot "$MOUNT_POINT" chown "$USERNAME:$USERNAME" "/home/$USERNAME/.zshrc"
             ;;
         fish)
             mkdir -p "$MOUNT_POINT/home/$USERNAME/.config/fish"
