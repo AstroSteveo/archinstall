@@ -52,6 +52,14 @@ fatal() {
     exit 1
 }
 
+error_trap() {
+    local exit_code=$?
+    local line="$1"
+    local cmd="$2"
+    error "Command '${cmd}' failed at line ${line} with exit code ${exit_code}"
+    exit "$exit_code"
+}
+
 #######################################
 # Pre-flight checks
 #######################################
@@ -610,6 +618,7 @@ main() {
     require_root
     check_dependencies
     trap cleanup EXIT
+    trap 'error_trap $LINENO $BASH_COMMAND' ERR
     info "Starting Arch Linux installation"
     validate_uefi_boot
     validate_network
