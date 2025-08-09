@@ -70,7 +70,7 @@ require_root() {
 }
 
 check_dependencies() {
-    local deps=(lsblk curl sgdisk partprobe pacstrap arch-chroot)
+    local deps=(lsblk curl sgdisk partprobe pacstrap arch-chroot numfmt)
     for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             fatal "Required command '$cmd' not found"
@@ -180,6 +180,19 @@ validate_username() {
 
 validate_hostname() {
     [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]
+}
+
+validate_disk_size() {
+    local disk_bytes efi_bytes swap_bytes root_min bytes_required
+    disk_bytes=$(lsblk -b -dn -o SIZE "$DISK")
+    efi_bytes=$(numfmt --from=iec "$EFI_SIZE")
+    swap_bytes=$(numfmt --from=iec "$SWAP_SIZE")
+    root_min=$((1 * 1024 * 1024 * 1024))
+    bytes_required=$((efi_bytes + swap_bytes + root_min))
+    if (( disk_bytes < bytes_required )); then
+        fatal "Disk size $(numfmt --to=iec $disk_bytes) is smaller than required $(numfmt --to=iec $bytes_required)"
+    fi
+    success "Disk has sufficient capacity: $(numfmt --to=iec $disk_bytes)"
 }
 
 #######################################
@@ -467,8 +480,13 @@ mount_filesystems() {
 #######################################
 configure_pacman() {
     info "Configuring pacman"
+    local pacman_conf="$MOUNT_POINT/etc/pacman.conf"
     if [[ "$ENABLE_MULTILIB" == "yes" ]]; then
-        sed -i '/^\[multilib\]/,/^Include/ s/^#//' "$MOUNT_POINT/etc/pacman.conf"
+        if [[ -f "$pacman_conf" ]]; then
+            sed -i '/^\[multilib\]/,/^Include/ s/^#//' "$pacman_conf"
+        else
+            warning "pacman.conf not found; skipping multilib configuration"
+        fi
     fi
     arch-chroot "$MOUNT_POINT" pacman -Sy --noconfirm
     success "Pacman configured successfully"
@@ -508,7 +526,7 @@ install_additional_packages() {
 
 configure_system() {
     info "Configuring system"
-    genfstab -U "$MOUNT_POINT" >> "$MOUNT_POINT/etc/fstab"
+    genfstab -U "$MOUNT_POINT" > "$MOUNT_POINT/etc/fstab"
 
     # Timezone & locale
     arch-chroot "$MOUNT_POINT" ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
@@ -644,6 +662,7 @@ main() {
 
     get_disk_selection
     configure_swap_size
+    validate_disk_size
     get_filesystem_type
     [[ "$FILESYSTEM_TYPE" == "btrfs" ]] && get_btrfs_layout
     get_hostname

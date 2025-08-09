@@ -213,6 +213,12 @@ sda 100G MockDisk disk
 sdb 50G MockDisk disk
 nvme0n1 250G MockNVMe disk
 LSBLK_OUTPUT
+elif [[ "$*" == *"-b -dn -o SIZE /dev/sda"* ]]; then
+    echo "107374182400"
+elif [[ "$*" == *"-b -dn -o SIZE /dev/sdb"* ]]; then
+    echo "53687091200"
+elif [[ "$*" == *"-b -dn -o SIZE /dev/nvme0n1"* ]]; then
+    echo "268435456000"
 else
     echo "sda sdb nvme0n1"
 fi
