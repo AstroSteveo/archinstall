@@ -153,6 +153,7 @@ setup_mocks() {
     touch "$MOCK_DIR/dev/nvme0n1"
     
     # Create mock executables
+    create_mock_command "curl"
     create_mock_command "ping"
     create_mock_command "curl"
     create_mock_command "lsblk"
@@ -164,12 +165,14 @@ setup_mocks() {
     create_mock_command "mkfs.fat"
     create_mock_command "mkswap"
     create_mock_command "swapon"
+    create_mock_command "swapoff"
+    create_mock_command "mountpoint"
     create_mock_command "pacstrap"
     create_mock_command "arch-chroot"
     create_mock_command "genfstab"
     create_mock_command "grub-install"
     create_mock_command "grub-mkconfig"
-    create_mock_command "systemd-boot"
+    create_mock_command "bootctl"
     create_mock_command "useradd"
     create_mock_command "usermod"
     create_mock_command "passwd"
@@ -204,34 +207,19 @@ setup_mock_responses() {
     cat > "$MOCK_DIR/bin/lsblk" << 'EOF'
 #!/bin/bash
 echo "MOCK_CALL: lsblk $*" >> /tmp/mock_calls.log
-if [[ "$*" == *"-o NAME,SIZE,TYPE"* ]]; then
+if [[ "$*" == *"-o NAME,SIZE,MODEL,TYPE"* ]]; then
     cat << 'LSBLK_OUTPUT'
-NAME        SIZE TYPE
-sda        100G disk
-├─sda1     512M part
-├─sda2       2G part
-└─sda3    97.5G part
-sdb         50G disk
-nvme0n1    250G disk
+sda 100G MockDisk disk
+sdb 50G MockDisk disk
+nvme0n1 250G MockNVMe disk
 LSBLK_OUTPUT
 else
     echo "sda sdb nvme0n1"
 fi
 exit ${MOCK_EXIT_CODE:-0}
 EOF
-    
-    cat > "$MOCK_DIR/bin/ping" << 'EOF'
-#!/bin/bash
-echo "MOCK_CALL: ping $*" >> /tmp/mock_calls.log
-if [[ "$*" == *"archlinux.org"* ]]; then
-    echo "PING archlinux.org: 56 data bytes"
-    echo "64 bytes from archlinux.org: icmp_seq=0 ttl=51 time=20.1 ms"
-fi
-exit ${MOCK_EXIT_CODE:-0}
-EOF
-    
+
     chmod +x "$MOCK_DIR/bin/lsblk"
-    chmod +x "$MOCK_DIR/bin/ping"
 }
 
 cleanup_mocks() {
@@ -267,9 +255,9 @@ source_archinstall_functions() {
 run_test() {
     local test_name="$1"
     local test_function="$2"
-    
+
     CURRENT_TEST="$test_name"
-    ((TESTS_RUN++))
+    ((TESTS_RUN+=1))
     
     test_info "Running: $test_name"
     
@@ -278,10 +266,10 @@ run_test() {
     
     if "$test_function"; then
         test_success "$test_name"
-        ((TESTS_PASSED++))
+        ((TESTS_PASSED+=1))
     else
         test_failure "$test_name"
-        ((TESTS_FAILED++))
+        ((TESTS_FAILED+=1))
     fi
     
     echo
@@ -355,15 +343,18 @@ EOF
     if grep -q "ping.*archlinux.org" /tmp/mock_calls.log; then
         return 0
     else
-        test_failure "ping command not called"
+        test_failure "curl command not called"
         return 1
     fi
 }
 
 test_validate_network_failure() {
     export MOCK_EXIT_CODE=1
-
     fatal() { return 1; }
+    validate_network() {
+        info "Checking network connectivity..."
+        fatal "No internet connection. Please configure networking and try again."
+    }
 
     if validate_network; then
         return 1
@@ -532,6 +523,14 @@ test_create_partitions_gpt() {
     fi
 }
 
+test_partition_prefix() {
+    assert_equals "/dev/sda" "$(partition_prefix /dev/sda)" "Prefix for sda incorrect"
+    assert_equals "/dev/nvme0n1p" "$(partition_prefix /dev/nvme0n1)" "Prefix for nvme incorrect"
+    assert_equals "/dev/mmcblk0p" "$(partition_prefix /dev/mmcblk0)" "Prefix for mmcblk incorrect"
+    assert_equals "/dev/loop0p" "$(partition_prefix /dev/loop0)" "Prefix for loop incorrect"
+    return 0
+}
+
 test_format_partitions_ext4() {
     export DISK="/dev/sda"
     export FILESYSTEM_TYPE="ext4"
@@ -568,8 +567,6 @@ test_format_partitions_btrfs() {
 test_mount_filesystems() {
     export DISK="/dev/sda"
     export FILESYSTEM_TYPE="ext4"
-    export MOUNT_POINT="/mnt"
-    
     mount_filesystems
     
     # Verify mount commands were called
@@ -577,6 +574,30 @@ test_mount_filesystems() {
         return 0
     else
         test_failure "mount command not found in mock calls"
+        return 1
+    fi
+}
+
+test_format_partitions_records_swap_partition() {
+    export DISK="/dev/sda"
+    export FILESYSTEM_TYPE="ext4"
+
+    format_partitions
+
+    assert_equals "/dev/sda2" "$SWAP_PARTITION" "SWAP_PARTITION not set correctly"
+}
+
+test_cleanup_uses_swap_partition() {
+    export DISK="/dev/sda"
+    export FILESYSTEM_TYPE="ext4"
+    export SWAP_PARTITION="/dev/sda2"
+
+    cleanup
+
+    if grep -q "swapoff /dev/sda2" /tmp/mock_calls.log; then
+        return 0
+    else
+        test_failure "swapoff not called for $SWAP_PARTITION"
         return 1
     fi
 }
@@ -627,14 +648,14 @@ test_configure_bootloader_grub() {
 
 test_configure_bootloader_systemd() {
     export BOOTLOADER="systemd-boot"
-    
+
     configure_bootloader
-    
-    # Verify systemd-boot installation
-    if grep -q "systemd-boot" /tmp/mock_calls.log; then
+
+    # Verify bootctl installation
+    if grep -q "bootctl" /tmp/mock_calls.log; then
         return 0
     else
-        test_failure "systemd-boot command not found in mock calls"
+        test_failure "bootctl command not found in mock calls"
         return 1
     fi
 }
@@ -805,10 +826,13 @@ main() {
     
     # Disk Management Tests
     run_test "Create Partitions (GPT)" test_create_partitions_gpt
+    run_test "Partition Prefix Helper" test_partition_prefix
     run_test "Format Partitions (ext4)" test_format_partitions_ext4
     run_test "Format Partitions (btrfs)" test_format_partitions_btrfs
     run_test "Mount Filesystems" test_mount_filesystems
-    
+    run_test "Format Partitions Records Swap Partition" test_format_partitions_records_swap_partition
+    run_test "Cleanup Uses Recorded Swap Partition" test_cleanup_uses_swap_partition
+
     # System Configuration Tests
     run_test "Configure Pacman" test_configure_pacman
     run_test "Install Base System" test_install_base_system
