@@ -34,6 +34,10 @@ ENABLE_MULTILIB="no"
 SWAP_SIZE="$DEFAULT_SWAP_SIZE"
 EFI_SIZE="$DEFAULT_EFI_SIZE"
 TIMEZONE=""
+LOCALE=""
+EDITOR_CHOICE=""
+BTRFS_MOUNT_OPTIONS="compress=zstd,noatime"
+BOOTLOADER_TIMEOUT="3"
 SWAP_PARTITION=""
 
 #######################################
@@ -256,6 +260,15 @@ get_btrfs_layout() {
     else
         warning "Custom Btrfs layouts are not implemented in this script. Falling back to default layout."
     fi
+    
+    if yes_no_prompt "Use default Btrfs mount options (compress=zstd,noatime)?"; then
+        info "Using default mount options"
+    else
+        if ! read -rp "Enter Btrfs mount options (e.g. compress=lzo,noatime): " BTRFS_MOUNT_OPTIONS; then
+            fatal "Input aborted"
+        fi
+        success "Btrfs mount options set to: $BTRFS_MOUNT_OPTIONS"
+    fi
 }
 
 get_hostname() {
@@ -335,6 +348,18 @@ get_bootloader_selection() {
         refind*)      BOOTLOADER="refind" ;;
     esac
     success "Selected bootloader: $BOOTLOADER"
+    
+    if [[ "$BOOTLOADER" == "systemd-boot" ]]; then
+        if ! read -rp "Enter bootloader timeout in seconds [default 3]: " timeout; then
+            fatal "Input aborted"
+        fi
+        if [[ -n "$timeout" && "$timeout" =~ ^[0-9]+$ ]]; then
+            BOOTLOADER_TIMEOUT="$timeout"
+            success "Bootloader timeout set to $BOOTLOADER_TIMEOUT seconds"
+        else
+            info "Using default timeout of 3 seconds"
+        fi
+    fi
 }
 
 detect_cpu_microcode() {
@@ -360,6 +385,17 @@ get_multilib_preference() {
     fi
 }
 
+get_editor_preference() {
+    EDITOR_CHOICE=$(select_from_menu \
+        "Select text editor to install:" \
+        "vim" \
+        "nano" \
+        "both" \
+        "none" \
+    )
+    success "Editor selection: $EDITOR_CHOICE"
+}
+
 choose_timezone() {
     info "Setting timezone. You can choose your region."
     local auto_zone
@@ -378,6 +414,37 @@ choose_timezone() {
         [[ -f "/usr/share/zoneinfo/$TIMEZONE" ]] && break
         warning "Invalid timezone. Please choose a valid entry from /usr/share/zoneinfo."
     done
+}
+
+choose_locale() {
+    info "Selecting system locale"
+    LOCALE=$(select_from_menu \
+        "Select system locale:" \
+        "en_US.UTF-8" \
+        "en_GB.UTF-8" \
+        "de_DE.UTF-8" \
+        "fr_FR.UTF-8" \
+        "es_ES.UTF-8" \
+        "it_IT.UTF-8" \
+        "pt_BR.UTF-8" \
+        "ru_RU.UTF-8" \
+        "ja_JP.UTF-8" \
+        "zh_CN.UTF-8" \
+        "Other (manual entry)" \
+    )
+    if [[ "$LOCALE" == "Other (manual entry)" ]]; then
+        while true; do
+            if ! read -rp "Enter locale (e.g. en_US.UTF-8): " LOCALE; then
+                fatal "Input aborted"
+            fi
+            if [[ "$LOCALE" =~ ^[a-z]{2}_[A-Z]{2}\.UTF-8$ ]]; then
+                break
+            else
+                warning "Invalid locale format. Use format like 'en_US.UTF-8'"
+            fi
+        done
+    fi
+    success "Selected locale: $LOCALE"
 }
 
 configure_swap_size() {
@@ -462,12 +529,12 @@ mount_filesystems() {
         umount "$MOUNT_POINT/boot"
         umount "$MOUNT_POINT"
 
-        mount -o subvol=@,compress=zstd,noatime "$root_partition" "$MOUNT_POINT"
+        mount -o subvol=@,$BTRFS_MOUNT_OPTIONS "$root_partition" "$MOUNT_POINT"
 
         mkdir -p "$MOUNT_POINT/home" "$MOUNT_POINT/var/log" "$MOUNT_POINT/var/cache/pacman/pkg"
-        mount -o subvol=@home,compress=zstd,noatime "$root_partition" "$MOUNT_POINT/home"
-        mount -o subvol=@log,compress=zstd,noatime "$root_partition" "$MOUNT_POINT/var/log"
-        mount -o subvol=@pkg,compress=zstd,noatime "$root_partition" "$MOUNT_POINT/var/cache/pacman/pkg"
+        mount -o subvol=@home,$BTRFS_MOUNT_OPTIONS "$root_partition" "$MOUNT_POINT/home"
+        mount -o subvol=@log,$BTRFS_MOUNT_OPTIONS "$root_partition" "$MOUNT_POINT/var/log"
+        mount -o subvol=@pkg,$BTRFS_MOUNT_OPTIONS "$root_partition" "$MOUNT_POINT/var/cache/pacman/pkg"
 
         mkdir -p "$MOUNT_POINT/boot"
         mount "$efi_partition" "$MOUNT_POINT/boot"
@@ -510,7 +577,12 @@ install_base_system() {
 
 install_additional_packages() {
     info "Installing additional essential packages"
-    local pkgs=(networkmanager sudo vim nano)
+    local pkgs=(networkmanager sudo)
+    case "$EDITOR_CHOICE" in
+        vim) pkgs+=(vim) ;;
+        nano) pkgs+=(nano) ;;
+        both) pkgs+=(vim nano) ;;
+    esac
     case "$BOOTLOADER" in
         grub)        pkgs+=(grub efibootmgr) ;;
         systemd-boot) ;; # systemd-boot is part of systemd
@@ -531,9 +603,9 @@ configure_system() {
     # Timezone & locale
     arch-chroot "$MOUNT_POINT" ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
     arch-chroot "$MOUNT_POINT" hwclock --systohc
-    echo "en_US.UTF-8 UTF-8" >> "$MOUNT_POINT/etc/locale.gen"
+    echo "$LOCALE UTF-8" >> "$MOUNT_POINT/etc/locale.gen"
     arch-chroot "$MOUNT_POINT" locale-gen
-    echo "LANG=en_US.UTF-8" > "$MOUNT_POINT/etc/locale.conf"
+    echo "LANG=$LOCALE" > "$MOUNT_POINT/etc/locale.conf"
 
     # Hostname & hosts file
     echo "$HOSTNAME" > "$MOUNT_POINT/etc/hostname"
@@ -564,9 +636,7 @@ configure_bootloader() {
             arch-chroot "$MOUNT_POINT" bootctl --path=/boot install
             cat > "$MOUNT_POINT/boot/loader/loader.conf" <<EOF
 default arch.conf
-timeout 3
-console-mode max
-editor no
+timeout $BOOTLOADER_TIMEOUT
 EOF
             cat > "$MOUNT_POINT/boot/loader/entries/arch.conf" <<EOF
 title   Arch Linux
@@ -602,28 +672,7 @@ configure_users() {
         chmod 440 "$MOUNT_POINT/etc/sudoers.d/$USERNAME"
     fi
 
-    case "$USER_SHELL" in
-        zsh)
-            cat > "$MOUNT_POINT/home/$USERNAME/.zshrc" <<'EOF'
-# Simple zsh configuration
-autoload -Uz compinit && compinit
-HISTSIZE=1000
-SAVEHIST=1000
-HISTFILE=~/.zsh_history
-setopt appendhistory
-PS1='%n@%m:%~$ '
-EOF
-            arch-chroot "$MOUNT_POINT" chown "$USERNAME:$USERNAME" "/home/$USERNAME/.zshrc"
-            ;;
-        fish)
-            mkdir -p "$MOUNT_POINT/home/$USERNAME/.config/fish"
-            cat > "$MOUNT_POINT/home/$USERNAME/.config/fish/config.fish" <<'EOF'
-# Basic fish configuration
-set fish_greeting ""
-EOF
-            arch-chroot "$MOUNT_POINT" chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config"
-            ;;
-    esac
+    # No default shell configurations - let users configure their shell as they prefer
     success "Users configured successfully"
 }
 
@@ -667,16 +716,18 @@ main() {
     [[ "$FILESYSTEM_TYPE" == "btrfs" ]] && get_btrfs_layout
     get_hostname
     choose_timezone
+    choose_locale
     get_root_password
     get_user_configuration
     get_bootloader_selection
     detect_cpu_microcode
+    get_editor_preference
     get_multilib_preference
 
     # Summary
     info "Installation summary:"
-    printf 'Disk: %s\nFilesystem: %s\nEFI size: %s\nSwap size: %s\nHostname: %s\nUsername: %s\nShell: %s\nSudo: %s\nBootloader: %s\nCPU: %s\nMultilib: %s\nTimezone: %s\n\n' \
-        "$DISK" "$FILESYSTEM_TYPE" "$EFI_SIZE" "$SWAP_SIZE" "$HOSTNAME" "$USERNAME" "$USER_SHELL" "$ENABLE_SUDO" "$BOOTLOADER" "$CPU_VENDOR" "$ENABLE_MULTILIB" "$TIMEZONE"
+    printf 'Disk: %s\nFilesystem: %s\nEFI size: %s\nSwap size: %s\nHostname: %s\nUsername: %s\nShell: %s\nSudo: %s\nBootloader: %s\nCPU: %s\nEditor: %s\nMultilib: %s\nTimezone: %s\nLocale: %s\n\n' \
+        "$DISK" "$FILESYSTEM_TYPE" "$EFI_SIZE" "$SWAP_SIZE" "$HOSTNAME" "$USERNAME" "$USER_SHELL" "$ENABLE_SUDO" "$BOOTLOADER" "$CPU_VENDOR" "$EDITOR_CHOICE" "$ENABLE_MULTILIB" "$TIMEZONE" "$LOCALE"
 
     yes_no_prompt "Proceed with installation?" || fatal "Installation cancelled by user"
 
