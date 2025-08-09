@@ -213,7 +213,7 @@ get_disk_selection() {
             disks+=("/dev/$name")
             labels+=("$name ($size) - $model")
         fi
-    done < <(lsblk -dn -o NAME,SIZE,MODEL,TYPE | awk '$4 == "disk"')
+    done < <(lsblk -dn -o NAME,SIZE,MODEL,TYPE | grep 'disk$')
 
     if [[ ${#disks[@]} -eq 0 ]]; then
         fatal "No suitable disks found"
