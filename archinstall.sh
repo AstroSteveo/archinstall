@@ -109,9 +109,9 @@ select_from_menu() {
     local num="${#options[@]}"
     local choice
     while true; do
-        info "$prompt"
+        info "$prompt" >&2
         for i in "${!options[@]}"; do
-            printf '%d) %s\n' "$((i+1))" "${options[i]}"
+            printf '%d) %s\n' "$((i+1))" "${options[i]}" >&2
         done
         if ! read -rp "Select an option (1-${num}): " choice; then
             fatal "Input aborted"
@@ -120,7 +120,7 @@ select_from_menu() {
             echo "${options[$((choice-1))]}"
             return 0
         fi
-        warning "Invalid choice. Please select a number between 1 and ${num}."
+        warning "Invalid choice. Please select a number between 1 and ${num}." >&2
     done
 }
 
